@@ -1,15 +1,12 @@
 import { ChatShell } from "@/components/chat-shell";
+import { requireUser } from "@/lib/auth-guard";
 import { backendGet } from "@/lib/server-api";
-import { supabaseServer } from "@/lib/supabase/server";
 import type { ThreadSummary } from "@/types";
 
 export const dynamic = "force-dynamic";
 
 export default async function ChatLayout({ children }: { children: React.ReactNode }) {
-  const supabase = await supabaseServer();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const user = await requireUser();
 
   let threads: ThreadSummary[] = [];
   try {
@@ -20,7 +17,7 @@ export default async function ChatLayout({ children }: { children: React.ReactNo
   }
 
   return (
-    <ChatShell initialThreads={threads} userEmail={user?.email ?? ""}>
+    <ChatShell initialThreads={threads} userEmail={user.email ?? ""}>
       {children}
     </ChatShell>
   );
