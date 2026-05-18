@@ -1,0 +1,40 @@
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.python-version
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+
+# uv
+.uv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+
+# Secrets / keys (defense in depth — should never be in repo)
+*.json.key
+*-service-account*.json
+gastrobrain-production-*.json
+
+# Local artifacts
+corpus/*
+!corpus/.gitkeep
+*.log
+*.sqlite
