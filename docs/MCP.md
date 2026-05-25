@@ -9,10 +9,14 @@ The MCP server is **search-only**. It returns ranked chunks with citations;
 the calling agent uses its own LLM to produce the final answer. No Sonnet
 spending happens on the Gastrobrain side for MCP traffic.
 
-- Endpoint: `https://<cloud-run-url>/mcp`
+- Endpoint: `https://<cloud-run-url>/mcp/` (trailing slash required)
 - Transport: Streamable HTTP (JSON responses, stateless)
 - Auth: `Authorization: Bearer <token>`
 - Tool surface: `search_knowledge(query, top_k=8, min_score=0.20)`
+
+> **Trailing slash:** Cloud Run 307-redirects `/mcp` → `/mcp/`, and most
+> MCP clients (Claude Code included) don't follow the redirect. Always
+> register the canonical URL with the trailing slash.
 
 ---
 
@@ -47,7 +51,7 @@ so use something identifying (`itsuki`, `team-alpha`, `cursor-laptop`).
 
 ```bash
 claude mcp add --transport http gastrobrain \
-  https://<cloud-run-url>/mcp \
+  https://<cloud-run-url>/mcp/ \
   --header "Authorization: Bearer tok_xxx"
 ```
 
@@ -65,7 +69,7 @@ Either use the GUI (Settings → MCP → Add MCP server) or edit
   "mcpServers": {
     "gastrobrain": {
       "type": "streamable-http",
-      "url": "https://<cloud-run-url>/mcp",
+      "url": "https://<cloud-run-url>/mcp/",
       "headers": {
         "Authorization": "Bearer tok_xxx"
       }
@@ -85,7 +89,7 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`
 
 Settings → Connectors → **Add custom connector**:
 
-- URL: `https://<cloud-run-url>/mcp`
+- URL: `https://<cloud-run-url>/mcp/`
 - Auth: Bearer + paste your token
 
 ---

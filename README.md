@@ -30,9 +30,12 @@ search Gastrobrain in one command:
 
 ```bash
 claude mcp add --transport http gastrobrain \
-  https://<cloud-run-url>/mcp \
+  https://<cloud-run-url>/mcp/ \
   --header "Authorization: Bearer tok_xxx"
 ```
+
+The trailing slash matters — Cloud Run otherwise 307-redirects and most
+MCP clients don't follow the redirect.
 
 See [`docs/MCP.md`](docs/MCP.md) for tokens, other clients, and tool
 schemas.
