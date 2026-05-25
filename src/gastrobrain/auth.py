@@ -10,6 +10,7 @@ authenticates the request."""
 
 from __future__ import annotations
 
+import hmac
 import logging
 import time
 from dataclasses import dataclass
@@ -170,3 +171,42 @@ async def require_user(authorization: str | None = Header(default=None)) -> Auth
         ) from exc
 
     return AuthUser(user_id=user_id, email=claims.get("email"))
+
+
+# --------------------------------------------------------------------------------------
+# Service tokens (for the MCP transport)
+# --------------------------------------------------------------------------------------
+#
+# MCP clients (Claude Code, Cursor, Claude Desktop, claude.ai connectors) don't
+# carry Supabase JWTs. For the read-only `/mcp` route we accept a long-lived
+# bearer token instead. Tokens are configured via the GASTROBRAIN_MCP_TOKENS
+# env var as a comma-separated list of `label:secret` pairs — labels become
+# the `user_id` we record in the `queries` table for telemetry.
+
+
+def _parse_service_tokens(raw: str) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry or ":" not in entry:
+            continue
+        label, secret = entry.split(":", 1)
+        label, secret = label.strip(), secret.strip()
+        if label and secret:
+            out.append((label, secret))
+    return out
+
+
+def verify_service_token(raw_token: str) -> str:
+    """Constant-time match `raw_token` against the configured service tokens.
+
+    Returns the token's label on success. Raises ValueError on miss or when
+    no tokens are configured (defensive — the route should be gated upstream)."""
+    pairs = _parse_service_tokens(get_settings().gastrobrain_mcp_tokens)
+    if not pairs:
+        raise ValueError("no MCP service tokens configured")
+    raw_bytes = raw_token.encode()
+    for label, secret in pairs:
+        if hmac.compare_digest(raw_bytes, secret.encode()):
+            return label
+    raise ValueError("token did not match any configured MCP token")

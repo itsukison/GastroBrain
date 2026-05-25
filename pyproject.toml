@@ -1,6 +1,6 @@
 [project]
 name = "gastrobrain"
-version = "0.1.0"
+version = "0.2.0"
 description = "Gastroduce internal knowledge Q&A — v1 over NotePM"
 requires-python = ">=3.10"
 readme = "README.md"
@@ -8,6 +8,7 @@ dependencies = [
     "anthropic>=0.40.0",
     "cohere>=5.13.0",
     "fastapi>=0.115.0",
+    "mcp>=1.2.0,<2.0.0",
     "uvicorn[standard]>=0.32.0",
     "slack-sdk>=3.33.0",
     "aiohttp>=3.10.0",
@@ -17,6 +18,7 @@ dependencies = [
     "pydantic-settings>=2.6.0",
     "markdown-it-py>=3.0.0",
     "python-frontmatter>=1.1.0",
+    "pymupdf4llm>=0.0.17",
     "typer>=0.13.0",
     "rich>=13.9.0",
     "tenacity>=9.0.0",

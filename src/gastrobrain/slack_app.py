@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import hmac
 import json
 import logging
 import time
 import traceback
+from collections.abc import AsyncIterator
 from typing import Any
 from urllib.parse import parse_qs
 from uuid import UUID
@@ -26,8 +28,41 @@ from gastrobrain.web_api import router as web_router
 log = logging.getLogger("gastrobrain.slack")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
-app = FastAPI()
+
+# --------------------------------------------------------------------------------------
+# /mcp — Streamable HTTP MCP endpoint for external agents (Claude Code, etc.)
+# --------------------------------------------------------------------------------------
+#
+# Built lazily so disabling the surface (env: GASTROBRAIN_MCP_ENABLED=false)
+# skips importing the `mcp` package entirely. The session manager has to run
+# inside the FastAPI lifespan or the streamable transport's task group
+# won't start.
+
+_mcp_enabled = get_settings().gastrobrain_mcp_enabled and bool(
+    get_settings().gastrobrain_mcp_tokens.strip()
+)
+
+
+@contextlib.asynccontextmanager
+async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
+    if not _mcp_enabled:
+        log.info("MCP surface disabled (no tokens configured)")
+        yield
+        return
+    from gastrobrain.mcp_server import mcp_lifespan_cm
+
+    log.info("MCP surface enabled; entering session manager")
+    async with mcp_lifespan_cm():
+        yield
+
+
+app = FastAPI(lifespan=_lifespan)
 app.include_router(web_router)
+
+if _mcp_enabled:
+    from gastrobrain.mcp_server import build_mcp_asgi_app
+
+    app.mount("/mcp", build_mcp_asgi_app())
 
 
 @app.exception_handler(Exception)

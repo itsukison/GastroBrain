@@ -15,7 +15,7 @@ echo "Project: $PROJECT  Region: $REGION  Service: $SERVICE"
 echo ""
 
 OPTIONAL_SECRETS=()
-for s in LANGFUSE_PUBLIC_KEY LANGFUSE_SECRET_KEY; do
+for s in LANGFUSE_PUBLIC_KEY LANGFUSE_SECRET_KEY GASTROBRAIN_MCP_TOKENS; do
   if gcloud secrets describe "$s" >/dev/null 2>&1; then
     OPTIONAL_SECRETS+=("$s=$s:latest")
   fi

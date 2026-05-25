@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     web_history_window: int = 10
     web_allowed_origins: str = ""
 
+    # MCP — comma-separated "label:token" pairs. Empty disables the /mcp route.
+    gastrobrain_mcp_tokens: str = ""
+    gastrobrain_mcp_enabled: bool = True
+
     chunk_target_chars: int = 500
     chunk_overlap_chars: int = 80
     retrieve_top_k_dense: int = 50

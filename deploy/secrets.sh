@@ -20,6 +20,7 @@ echo "  - SLACK_BOT_TOKEN"
 echo "  - SLACK_SIGNING_SECRET"
 echo "  - LANGFUSE_PUBLIC_KEY  (optional, leave blank to skip)"
 echo "  - LANGFUSE_SECRET_KEY  (optional, leave blank to skip)"
+echo "  - GASTROBRAIN_MCP_TOKENS  (optional, leave blank to disable /mcp)"
 echo ""
 
 create_or_update() {
@@ -48,6 +49,7 @@ create_or_update SLACK_BOT_TOKEN       "Slack bot token (xoxb-... — use the RO
 create_or_update SLACK_SIGNING_SECRET  "Slack signing secret (just the hex, no 'signing secret:' prefix)"
 create_or_update LANGFUSE_PUBLIC_KEY   "Langfuse public key (optional, blank to skip)"
 create_or_update LANGFUSE_SECRET_KEY   "Langfuse secret key (optional, blank to skip)"
+create_or_update GASTROBRAIN_MCP_TOKENS "MCP bearer tokens, 'label:tok_xxx,label2:tok_yyy' (blank to disable /mcp)"
 
 echo ""
 echo "Granting Cloud Run runtime SA access to read these secrets..."
@@ -57,7 +59,7 @@ if [[ -z "$SA" ]]; then
 fi
 echo "  Cloud Run SA: $SA"
 
-for s in DATABASE_URL CLAUDE_API_KEY COHERE_API SLACK_BOT_TOKEN SLACK_SIGNING_SECRET LANGFUSE_PUBLIC_KEY LANGFUSE_SECRET_KEY; do
+for s in DATABASE_URL CLAUDE_API_KEY COHERE_API SLACK_BOT_TOKEN SLACK_SIGNING_SECRET LANGFUSE_PUBLIC_KEY LANGFUSE_SECRET_KEY GASTROBRAIN_MCP_TOKENS; do
   if gcloud secrets describe "$s" >/dev/null 2>&1; then
     gcloud secrets add-iam-policy-binding "$s" \
       --member="serviceAccount:$SA" \

@@ -12,30 +12,42 @@ from gastrobrain.chunker import chunk_markdown
 from gastrobrain.db import conn
 from gastrobrain.embed import embed_texts
 
-app = typer.Typer(add_completion=False, help="Ingest markdown files from a directory")
+app = typer.Typer(add_completion=False, help="Ingest markdown and PDF files from a directory")
 console = Console()
+
+SUPPORTED_SUFFIXES = {".md", ".pdf"}
 
 
 @app.command()
 def main(
-    corpus_dir: Path = typer.Argument(..., help="Directory containing .md files"),
+    corpus_dir: Path = typer.Argument(..., help="Directory containing .md and/or .pdf files"),
     source: str = typer.Option("manual", help="Source label: 'manual' or 'notepm'"),
     batch_size: int = typer.Option(96, help="Embedding batch size (Cohere limit: 96)"),
+    archive: bool = typer.Option(
+        True,
+        "--archive/--no-archive",
+        help="Move successfully processed files to <corpus_dir>/_ingested/ (default on)",
+    ),
 ) -> None:
     if not corpus_dir.is_dir():
         console.print(f"[red]Not a directory:[/red] {corpus_dir}")
         raise typer.Exit(1)
 
-    files = sorted(corpus_dir.glob("*.md"))
+    archive_dir = corpus_dir / "_ingested"
+    files = sorted(
+        f for f in corpus_dir.iterdir()
+        if f.is_file() and f.suffix.lower() in SUPPORTED_SUFFIXES
+    )
     files = [f for f in files if f.name != "README.md"]
     if not files:
-        console.print(f"[yellow]No .md files in[/yellow] {corpus_dir}")
+        console.print(f"[yellow]No .md or .pdf files in[/yellow] {corpus_dir}")
         raise typer.Exit(0)
 
-    console.print(f"Found [bold]{len(files)}[/bold] markdown files")
+    console.print(f"Found [bold]{len(files)}[/bold] files (.md / .pdf)")
 
     docs_ingested = 0
     docs_skipped = 0
+    docs_empty = 0
     chunks_total = 0
 
     with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}")) as prog:
@@ -46,22 +58,46 @@ def main(
             if result == "skipped":
                 docs_skipped += 1
                 console.print(f"  [dim]skip[/dim] {path.name} (unchanged)")
+                if archive:
+                    _archive_file(path, archive_dir)
+            elif isinstance(result, int) and result == 0:
+                docs_empty += 1
+                console.print(
+                    f"  [yellow]empty[/yellow] {path.name} (no extractable text — left in place)"
+                )
             else:
                 docs_ingested += 1
                 chunks_total += result
                 console.print(f"  [green]ok[/green]   {path.name} ({result} chunks)")
+                if archive:
+                    _archive_file(path, archive_dir)
 
-    console.print(
+    summary = (
         f"\n[bold]Done.[/bold] {docs_ingested} ingested, "
         f"{docs_skipped} skipped, {chunks_total} chunks total."
     )
+    if docs_empty:
+        summary += f" [yellow]{docs_empty} empty[/yellow] (likely scanned PDFs — OCR needed)."
+    if archive:
+        summary += f"\nArchived to [dim]{archive_dir}[/dim]."
+    console.print(summary)
+
+
+def _archive_file(path: Path, archive_dir: Path) -> None:
+    """Move a processed file into the archive dir. If a same-named file already
+    exists there (e.g., re-ingested after edit), append a timestamp suffix."""
+    archive_dir.mkdir(exist_ok=True)
+    dest = archive_dir / path.name
+    if dest.exists():
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        dest = archive_dir / f"{path.stem}.{stamp}{path.suffix}"
+    path.rename(dest)
 
 
 def _ingest_one(path: Path, source: str, batch_size: int) -> int | str:
-    raw = path.read_text(encoding="utf-8")
-    post = frontmatter.loads(raw)
-    body = post.content
-    meta = post.metadata
+    body, meta = _load_document(path)
+    if not body.strip():
+        return 0
 
     external_id = str(meta.get("external_id") or path.stem)
     # Prefer filename for manual corpus — H1s in our docs tend to be section
@@ -140,6 +176,23 @@ def _ingest_one(path: Path, source: str, batch_size: int) -> int | str:
             )
         c.commit()
         return len(chunks)
+
+
+def _load_document(path: Path) -> tuple[str, dict]:
+    """Load a corpus file as (markdown_body, metadata).
+
+    Markdown files are parsed with frontmatter. PDFs are converted to markdown
+    via pymupdf4llm and carry no frontmatter — title/url/etc. fall back to
+    filename-derived defaults in the caller.
+    """
+    suffix = path.suffix.lower()
+    if suffix == ".pdf":
+        import pymupdf4llm
+        body = pymupdf4llm.to_markdown(str(path), show_progress=False)
+        return body, {}
+    raw = path.read_text(encoding="utf-8")
+    post = frontmatter.loads(raw)
+    return post.content, dict(post.metadata)
 
 
 def _with_title_prefix(title: str, chunk_content: str) -> str:
