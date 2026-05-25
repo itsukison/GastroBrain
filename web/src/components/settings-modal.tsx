@@ -2,8 +2,12 @@
 
 import { useEffect, useState } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
-import { Check, ChevronDown } from "lucide-react";
+import { Check, ChevronDown, Copy } from "lucide-react";
 import type { Department, UserPreferences } from "@/types";
+
+const MCP_INSTALL_CMD = `claude mcp add --transport http --scope user gastrobrain \\
+  https://gastrobrain-rjp7bbdhta-an.a.run.app/mcp/ \\
+  --header "Authorization: Bearer <YOUR_TOKEN>"`;
 
 const DEPARTMENT_OPTIONS: { value: Department | ""; label: string }[] = [
   { value: "", label: "未設定" },
@@ -79,6 +83,17 @@ export function SettingsModal({
   const [extraNote, setExtraNote] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [mcpCopied, setMcpCopied] = useState(false);
+
+  async function copyMcpCmd() {
+    try {
+      await navigator.clipboard.writeText(MCP_INSTALL_CMD);
+      setMcpCopied(true);
+      setTimeout(() => setMcpCopied(false), 1500);
+    } catch {
+      // clipboard API may be unavailable on insecure contexts; silently no-op
+    }
+  }
 
   const NOTE_MAX = 300;
   const noteLen = extraNote.length;
@@ -208,6 +223,30 @@ export function SettingsModal({
           <p className="mt-1.5 text-[11px] text-muted-foreground leading-relaxed">
             業務でよく扱う領域・用語・回答してほしいスタイルなどを書くと、回答のトーンや言葉選びに反映されます。
           </p>
+        </div>
+
+        <div className="mt-5">
+          <div className="block text-[13px] font-medium text-foreground mb-1.5">
+            MCP連携（Claude Code / Cursor）
+          </div>
+          <p className="text-[11px] text-muted-foreground leading-relaxed mb-2">
+            Claude Code から Gastrobrain を検索できるようにします。トークンは管理者にDMで依頼してください。
+          </p>
+          <div className="relative rounded-lg border border-sidebar-border bg-sidebar-accent/30 p-3 pr-11 font-mono text-[11px] leading-relaxed text-foreground whitespace-pre overflow-x-auto">
+            {MCP_INSTALL_CMD}
+            <button
+              type="button"
+              onClick={copyMcpCmd}
+              aria-label={mcpCopied ? "Copied" : "Copy install command"}
+              className="absolute top-2 right-2 h-7 w-7 rounded-md border border-sidebar-border bg-background flex items-center justify-center hover:bg-sidebar-accent transition"
+            >
+              {mcpCopied ? (
+                <Check className="w-3.5 h-3.5" aria-hidden />
+              ) : (
+                <Copy className="w-3.5 h-3.5 text-muted-foreground" aria-hidden />
+              )}
+            </button>
+          </div>
         </div>
 
         <div className="mt-4 rounded-lg bg-sidebar-accent/40 p-3 text-[11px] text-muted-foreground leading-relaxed">
