@@ -9,8 +9,11 @@ policies in 002_web_chat.sql are defense-in-depth for direct DB access.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import re
+import secrets
 import time
 from typing import Any
 from uuid import UUID
@@ -598,6 +601,111 @@ async def put_preferences(
             }
 
     return PreferencesOut(**await asyncio.to_thread(_do))
+
+
+# --------------------------------------------------------------------------------------
+# MCP tokens (self-service — logged-in users can mint their own bearer tokens
+# for the /mcp/ endpoint without bothering an admin)
+# --------------------------------------------------------------------------------------
+
+
+class McpTokenOut(BaseModel):
+    """A token row returned to the owner. `token` is populated only on the
+    POST response — never on subsequent GETs, since we don't store the raw."""
+    id: UUID
+    label: str
+    created_at: str
+    last_used_at: str | None
+    token: str | None = None
+
+
+def _label_from_email(email: str | None) -> str:
+    """Derive a telemetry label from the user's email username. Falls back to
+    'user' so the label is never empty. Sanitised to [a-z0-9._-] so it's safe
+    in logs and dashboards."""
+    local = (email or "").split("@", 1)[0].strip().lower()
+    cleaned = re.sub(r"[^a-z0-9._-]", "", local)
+    return cleaned or "user"
+
+
+@router.get("/mcp/tokens")
+async def list_mcp_tokens(user: AuthUser = Depends(require_user)) -> dict[str, list[dict]]:
+    def _do() -> list[dict]:
+        with conn() as c, c.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, label, created_at, last_used_at
+                FROM mcp_tokens
+                WHERE user_id = %s AND revoked_at IS NULL
+                ORDER BY created_at DESC
+                """,
+                (str(user.user_id),),
+            )
+            return [
+                {
+                    "id": str(r[0]),
+                    "label": r[1],
+                    "created_at": r[2].isoformat(),
+                    "last_used_at": r[3].isoformat() if r[3] else None,
+                }
+                for r in cur.fetchall()
+            ]
+
+    return {"tokens": await asyncio.to_thread(_do)}
+
+
+@router.post("/mcp/tokens", response_model=McpTokenOut)
+async def mint_mcp_token(user: AuthUser = Depends(require_user)) -> McpTokenOut:
+    """Mint a new bearer token for this user. The raw value is returned exactly
+    once — we only persist its sha256 hash. Subsequent GETs never include the
+    raw token. Lost it? Mint a new one and revoke the old."""
+    raw_token = "tok_" + secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+    label = _label_from_email(user.email)
+
+    def _do() -> dict[str, Any]:
+        with conn() as c, c.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO mcp_tokens (user_id, token_hash, label)
+                VALUES (%s, %s, %s)
+                RETURNING id, label, created_at, last_used_at
+                """,
+                (str(user.user_id), token_hash, label),
+            )
+            row = cur.fetchone()
+            c.commit()
+            return {
+                "id": str(row[0]),
+                "label": row[1],
+                "created_at": row[2].isoformat(),
+                "last_used_at": row[3].isoformat() if row[3] else None,
+            }
+
+    result = await asyncio.to_thread(_do)
+    return McpTokenOut(**result, token=raw_token)
+
+
+@router.delete("/mcp/tokens/{token_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def revoke_mcp_token(
+    token_id: UUID,
+    user: AuthUser = Depends(require_user),
+) -> None:
+    def _do() -> None:
+        with conn() as c, c.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE mcp_tokens
+                SET revoked_at = now()
+                WHERE id = %s AND user_id = %s AND revoked_at IS NULL
+                """,
+                (str(token_id), str(user.user_id)),
+            )
+            if cur.rowcount == 0:
+                raise HTTPException(status_code=404, detail="token not found")
+            c.commit()
+
+    await asyncio.to_thread(_do)
 
 
 # --------------------------------------------------------------------------------------

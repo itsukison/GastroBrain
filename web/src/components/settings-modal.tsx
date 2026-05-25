@@ -1,13 +1,20 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
-import { Check, ChevronDown, Copy, User, Plug } from "lucide-react";
+import {
+  AlertTriangle,
+  Check,
+  ChevronDown,
+  Copy,
+  Plug,
+  Trash2,
+  User,
+} from "lucide-react";
 import type { Department, UserPreferences } from "@/types";
 
-const MCP_INSTALL_CMD = `claude mcp add --transport http --scope user gastrobrain \\
-  https://gastrobrain-rjp7bbdhta-an.a.run.app/mcp/ \\
-  --header "Authorization: Bearer <YOUR_TOKEN>"`;
+const MCP_URL = "https://gastrobrain-rjp7bbdhta-an.a.run.app/mcp/";
+const TOKEN_PLACEHOLDER = "<YOUR_TOKEN>";
 
 const DEPARTMENT_OPTIONS: { value: Department | ""; label: string }[] = [
   { value: "", label: "未設定" },
@@ -25,6 +32,41 @@ const TABS: { id: Tab; label: string; icon: typeof User }[] = [
   { id: "profile", label: "プロフィール", icon: User },
   { id: "mcp", label: "MCP連携", icon: Plug },
 ];
+
+type Installer = "cc" | "claude_ai" | "desktop";
+
+const INSTALLERS: { id: Installer; label: string }[] = [
+  { id: "cc", label: "Claude Code" },
+  { id: "claude_ai", label: "claude.ai" },
+  { id: "desktop", label: "Claude Desktop" },
+];
+
+type TokenSummary = {
+  id: string;
+  label: string;
+  created_at: string;
+  last_used_at: string | null;
+};
+
+function ccCommand(token: string): string {
+  return `claude mcp add --transport http --scope user gastrobrain \\
+  ${MCP_URL} \\
+  --header "Authorization: Bearer ${token}"`;
+}
+
+function desktopJson(token: string): string {
+  return `{
+  "mcpServers": {
+    "gastrobrain": {
+      "type": "streamable-http",
+      "url": "${MCP_URL}",
+      "headers": {
+        "Authorization": "Bearer ${token}"
+      }
+    }
+  }
+}`;
+}
 
 function DepartmentDropdown({
   value,
@@ -79,6 +121,242 @@ function DepartmentDropdown({
   );
 }
 
+function CopyBlock({ value, ariaLabel }: { value: string; ariaLabel: string }) {
+  const [copied, setCopied] = useState(false);
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // ignore
+    }
+  }
+  return (
+    <div className="relative rounded-lg border border-sidebar-border bg-sidebar-accent/30 p-3 pr-11 font-mono text-[11px] leading-relaxed text-foreground whitespace-pre overflow-x-auto">
+      {value}
+      <button
+        type="button"
+        onClick={copy}
+        aria-label={copied ? "Copied" : ariaLabel}
+        className="absolute top-2 right-2 h-7 w-7 rounded-md border border-sidebar-border bg-background flex items-center justify-center hover:bg-sidebar-accent transition"
+      >
+        {copied ? (
+          <Check className="w-3.5 h-3.5" aria-hidden />
+        ) : (
+          <Copy className="w-3.5 h-3.5 text-muted-foreground" aria-hidden />
+        )}
+      </button>
+    </div>
+  );
+}
+
+function McpSection() {
+  const [tokens, setTokens] = useState<TokenSummary[] | null>(null);
+  const [newToken, setNewToken] = useState<string | null>(null);
+  const [minting, setMinting] = useState(false);
+  const [revoking, setRevoking] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [installer, setInstaller] = useState<Installer>("cc");
+
+  const refresh = useCallback(async () => {
+    setError(null);
+    try {
+      const r = await fetch("/api/mcp/tokens");
+      if (!r.ok) throw new Error(`${r.status}`);
+      const data = (await r.json()) as { tokens: TokenSummary[] };
+      setTokens(data.tokens);
+    } catch {
+      setError("トークン一覧の取得に失敗しました");
+      setTokens([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  async function mint() {
+    setMinting(true);
+    setError(null);
+    try {
+      const r = await fetch("/api/mcp/tokens", { method: "POST" });
+      if (!r.ok) throw new Error(`${r.status}`);
+      const data = (await r.json()) as TokenSummary & { token: string };
+      setNewToken(data.token);
+      setTokens((prev) => [
+        {
+          id: data.id,
+          label: data.label,
+          created_at: data.created_at,
+          last_used_at: data.last_used_at,
+        },
+        ...(prev ?? []),
+      ]);
+    } catch {
+      setError("トークンの発行に失敗しました");
+    } finally {
+      setMinting(false);
+    }
+  }
+
+  async function revoke(id: string) {
+    setRevoking(id);
+    setError(null);
+    try {
+      const r = await fetch(`/api/mcp/tokens/${id}`, { method: "DELETE" });
+      if (!r.ok && r.status !== 204) throw new Error(`${r.status}`);
+      setTokens((prev) => (prev ?? []).filter((t) => t.id !== id));
+    } catch {
+      setError("失効に失敗しました");
+    } finally {
+      setRevoking(null);
+    }
+  }
+
+  const tokenForDisplay = newToken ?? TOKEN_PLACEHOLDER;
+
+  return (
+    <section>
+      <h3 className="text-[14px] font-semibold text-foreground leading-snug">
+        MCP連携
+      </h3>
+      <p className="mt-1 text-[12px] text-muted-foreground leading-relaxed">
+        Claude Code・Cursor・claude.ai などから Gastrobrain を直接検索できます。
+      </p>
+
+      {newToken && (
+        <div className="mt-4 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
+          <div className="flex items-start gap-2 mb-2">
+            <AlertTriangle className="w-3.5 h-3.5 mt-0.5 text-amber-600 dark:text-amber-400 shrink-0" aria-hidden />
+            <div className="text-[12px] text-foreground leading-relaxed">
+              新しいトークンを発行しました。
+              <span className="font-medium">この画面を閉じると再表示できません。</span>
+              必ず控えてください。
+            </div>
+          </div>
+          <CopyBlock value={newToken} ariaLabel="Copy token" />
+        </div>
+      )}
+
+      <div className="mt-4 flex items-center justify-between gap-3">
+        <div className="text-[12px] text-muted-foreground">
+          {tokens === null
+            ? "読み込み中..."
+            : tokens.length === 0
+              ? "発行済みトークンはありません"
+              : `発行済み ${tokens.length} 件`}
+        </div>
+        <button
+          type="button"
+          onClick={mint}
+          disabled={minting}
+          className="h-8 px-3 rounded-md text-[12px] font-medium bg-foreground text-background hover:opacity-90 transition disabled:opacity-50"
+        >
+          {minting ? "発行中..." : "新しいトークンを発行"}
+        </button>
+      </div>
+
+      {tokens && tokens.length > 0 && (
+        <ul className="mt-2 space-y-1">
+          {tokens.map((t) => (
+            <li
+              key={t.id}
+              className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-md border border-sidebar-border bg-sidebar-accent/20 text-[12px]"
+            >
+              <div className="flex flex-col min-w-0">
+                <span className="font-mono text-foreground truncate">{t.label}</span>
+                <span className="text-[10px] text-muted-foreground">
+                  作成: {new Date(t.created_at).toLocaleDateString("ja-JP")}
+                  {t.last_used_at && (
+                    <> ・ 最終利用: {new Date(t.last_used_at).toLocaleDateString("ja-JP")}</>
+                  )}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => revoke(t.id)}
+                disabled={revoking === t.id}
+                aria-label="Revoke token"
+                className="h-7 w-7 rounded-md text-muted-foreground hover:text-red-500 hover:bg-red-500/10 flex items-center justify-center transition disabled:opacity-50"
+              >
+                <Trash2 className="w-3.5 h-3.5" aria-hidden />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div className="mt-5">
+        <div className="flex items-center gap-1 border-b border-sidebar-border mb-3">
+          {INSTALLERS.map(({ id, label }) => {
+            const active = installer === id;
+            return (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setInstaller(id)}
+                className={`px-3 h-8 text-[12px] -mb-px border-b-2 transition ${
+                  active
+                    ? "border-foreground text-foreground font-medium"
+                    : "border-transparent text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
+
+        {installer === "cc" && (
+          <div>
+            <p className="text-[11px] text-muted-foreground leading-relaxed mb-2">
+              ターミナルで以下のコマンドを実行してください。
+            </p>
+            <CopyBlock value={ccCommand(tokenForDisplay)} ariaLabel="Copy CLI command" />
+          </div>
+        )}
+
+        {installer === "claude_ai" && (
+          <div className="space-y-2.5">
+            <p className="text-[11px] text-muted-foreground leading-relaxed">
+              claude.ai の <span className="font-medium text-foreground">Settings → Connectors → Add custom connector</span> から以下を貼り付けてください。
+            </p>
+            <div>
+              <div className="text-[11px] text-muted-foreground mb-1">URL</div>
+              <CopyBlock value={MCP_URL} ariaLabel="Copy URL" />
+            </div>
+            <div>
+              <div className="text-[11px] text-muted-foreground mb-1">Bearer Token</div>
+              <CopyBlock value={tokenForDisplay} ariaLabel="Copy token" />
+            </div>
+          </div>
+        )}
+
+        {installer === "desktop" && (
+          <div>
+            <p className="text-[11px] text-muted-foreground leading-relaxed mb-2">
+              <code>~/Library/Application Support/Claude/claude_desktop_config.json</code>
+              （macOS）に以下を追記して Claude Desktop を再起動してください。
+            </p>
+            <CopyBlock value={desktopJson(tokenForDisplay)} ariaLabel="Copy config" />
+          </div>
+        )}
+
+        {!newToken && (
+          <p className="mt-2 text-[11px] text-muted-foreground leading-relaxed">
+            <code>{TOKEN_PLACEHOLDER}</code> は実際のトークンに置き換えてください。トークンをお持ちでない場合は上の「新しいトークンを発行」を押してください。
+          </p>
+        )}
+      </div>
+
+      {error && (
+        <div className="mt-3 text-[12px] text-red-500">{error}</div>
+      )}
+    </section>
+  );
+}
+
 export function SettingsModal({
   open,
   onClose,
@@ -91,21 +369,10 @@ export function SettingsModal({
   const [extraNote, setExtraNote] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [mcpCopied, setMcpCopied] = useState(false);
 
   const NOTE_MAX = 300;
   const noteLen = extraNote.length;
   const noteOver = noteLen > NOTE_MAX;
-
-  async function copyMcpCmd() {
-    try {
-      await navigator.clipboard.writeText(MCP_INSTALL_CMD);
-      setMcpCopied(true);
-      setTimeout(() => setMcpCopied(false), 1500);
-    } catch {
-      // clipboard API may be unavailable on insecure contexts; silently no-op
-    }
-  }
 
   useEffect(() => {
     if (!open) return;
@@ -118,7 +385,6 @@ export function SettingsModal({
 
   // Hydrate from server in the background. A failure here is not blocking —
   // user may simply have no row yet, or the API may be momentarily unreachable.
-  // The form stays interactive either way; only the PUT failure is surfaced.
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
@@ -212,7 +478,7 @@ export function SettingsModal({
             </nav>
           </aside>
 
-          <main className="flex-1 p-6 min-h-[360px]">
+          <main className="flex-1 p-6 min-h-[420px] max-h-[75vh] overflow-y-auto">
             {tab === "profile" ? (
               <section>
                 <h3 className="text-[14px] font-semibold text-foreground leading-snug">
@@ -274,51 +540,14 @@ export function SettingsModal({
                 </div>
               </section>
             ) : (
-              <section>
-                <h3 className="text-[14px] font-semibold text-foreground leading-snug">
-                  MCP連携
-                </h3>
-                <p className="mt-1 text-[12px] text-muted-foreground leading-relaxed">
-                  Claude Code・Cursor などの MCP 対応エージェントから Gastrobrain を直接検索できるようにします。トークンは管理者に DM で依頼してください。
-                </p>
-
-                <div className="mt-5">
-                  <div className="block text-[13px] font-medium text-foreground mb-1.5">
-                    Claude Code に追加
-                  </div>
-                  <div className="relative rounded-lg border border-sidebar-border bg-sidebar-accent/30 p-3 pr-11 font-mono text-[11px] leading-relaxed text-foreground whitespace-pre overflow-x-auto">
-                    {MCP_INSTALL_CMD}
-                    <button
-                      type="button"
-                      onClick={copyMcpCmd}
-                      aria-label={mcpCopied ? "Copied" : "Copy install command"}
-                      className="absolute top-2 right-2 h-7 w-7 rounded-md border border-sidebar-border bg-background flex items-center justify-center hover:bg-sidebar-accent transition"
-                    >
-                      {mcpCopied ? (
-                        <Check className="w-3.5 h-3.5" aria-hidden />
-                      ) : (
-                        <Copy className="w-3.5 h-3.5 text-muted-foreground" aria-hidden />
-                      )}
-                    </button>
-                  </div>
-                  <p className="mt-1.5 text-[11px] text-muted-foreground leading-relaxed">
-                    <code>&lt;YOUR_TOKEN&gt;</code> を発行されたトークンに置き換えて、ターミナルで実行してください。
-                  </p>
-                </div>
-
-                <div className="mt-5 rounded-lg bg-sidebar-accent/40 p-3 text-[11px] text-muted-foreground leading-relaxed">
-                  Cursor / Claude Desktop / claude.ai の設定方法は、社内ドキュメント
-                  <code className="mx-1">docs/MCP.md</code>
-                  を参照してください。
-                </div>
-              </section>
+              <McpSection />
             )}
           </main>
         </div>
 
         <div className="flex items-center justify-between gap-3 border-t border-sidebar-border px-6 py-3 bg-sidebar-accent/20">
           <div className="text-[12px] text-red-500 min-h-[1em]">
-            {error}
+            {tab === "profile" ? error : null}
           </div>
           <div className="flex gap-2.5">
             <button

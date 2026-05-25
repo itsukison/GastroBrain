@@ -10,6 +10,7 @@ authenticates the request."""
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import logging
 import time
@@ -200,13 +201,47 @@ def _parse_service_tokens(raw: str) -> list[tuple[str, str]]:
 def verify_service_token(raw_token: str) -> str:
     """Constant-time match `raw_token` against the configured service tokens.
 
-    Returns the token's label on success. Raises ValueError on miss or when
-    no tokens are configured (defensive — the route should be gated upstream)."""
-    pairs = _parse_service_tokens(get_settings().gastrobrain_mcp_tokens)
-    if not pairs:
-        raise ValueError("no MCP service tokens configured")
+    Two sources, checked in order:
+      1. Env var GASTROBRAIN_MCP_TOKENS — `label:secret` pairs from Secret
+         Manager. Admin-minted, break-glass.
+      2. `public.mcp_tokens` table — self-service tokens minted by logged-in
+         web users (POST /v1/mcp/tokens). Stored as sha256(token), never raw.
+
+    Returns the token's label on success. Raises ValueError on miss."""
     raw_bytes = raw_token.encode()
+    pairs = _parse_service_tokens(get_settings().gastrobrain_mcp_tokens)
     for label, secret in pairs:
         if hmac.compare_digest(raw_bytes, secret.encode()):
             return label
-    raise ValueError("token did not match any configured MCP token")
+
+    label = _lookup_db_token(raw_token)
+    if label is not None:
+        return label
+
+    raise ValueError("token did not match any configured or stored MCP token")
+
+
+def _lookup_db_token(raw_token: str) -> str | None:
+    """Look up a token by sha256 hash in `mcp_tokens`. Returns the label, or
+    None on miss. On hit, fire-and-forget update `last_used_at`. Import-local
+    to avoid a circular dep — db imports config which is imported here."""
+    digest = hashlib.sha256(raw_token.encode()).hexdigest()
+    from gastrobrain.db import conn
+
+    try:
+        with conn() as c, c.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE mcp_tokens
+                SET last_used_at = now()
+                WHERE token_hash = %s AND revoked_at IS NULL
+                RETURNING label
+                """,
+                (digest,),
+            )
+            row = cur.fetchone()
+            c.commit()
+            return row[0] if row else None
+    except Exception:
+        log.exception("mcp_tokens lookup failed")
+        return None
