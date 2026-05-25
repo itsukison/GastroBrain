@@ -201,11 +201,13 @@ def _parse_service_tokens(raw: str) -> list[tuple[str, str]]:
 def verify_service_token(raw_token: str) -> str:
     """Constant-time match `raw_token` against the configured service tokens.
 
-    Two sources, checked in order:
+    Three sources, checked cheapest-first:
       1. Env var GASTROBRAIN_MCP_TOKENS — `label:secret` pairs from Secret
          Manager. Admin-minted, break-glass.
-      2. `public.mcp_tokens` table — self-service tokens minted by logged-in
-         web users (POST /v1/mcp/tokens). Stored as sha256(token), never raw.
+      2. `public.mcp_tokens` table — self-service Personal Access Tokens
+         minted by logged-in web users. Stored as sha256(token).
+      3. OAuth 2.1 access token (JWT) — issued by /oauth/token. Validated
+         by HMAC signature + iss/aud/exp without touching the DB.
 
     Returns the token's label on success. Raises ValueError on miss."""
     raw_bytes = raw_token.encode()
@@ -213,6 +215,14 @@ def verify_service_token(raw_token: str) -> str:
     for label, secret in pairs:
         if hmac.compare_digest(raw_bytes, secret.encode()):
             return label
+
+    # Lazy import to avoid a circular dep (oauth.py imports require_user from
+    # this module).
+    from gastrobrain.oauth import verify_access_token
+
+    oauth_label = verify_access_token(raw_token)
+    if oauth_label is not None:
+        return oauth_label
 
     label = _lookup_db_token(raw_token)
     if label is not None:

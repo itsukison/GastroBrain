@@ -26,19 +26,20 @@ uv run gb-ask "EC在庫の発注ロジックは？"
 ## Connect agents (MCP)
 
 Any MCP-aware agent (Claude Code, Cursor, Claude Desktop, claude.ai) can
-search Gastrobrain in one command:
+search Gastrobrain in one command — no token to copy-paste:
 
 ```bash
-claude mcp add --transport http gastrobrain \
-  https://<cloud-run-url>/mcp/ \
-  --header "Authorization: Bearer tok_xxx"
+claude mcp add --transport http --scope user gastrobrain \
+  https://<cloud-run-url>/mcp/
 ```
 
-The trailing slash matters — Cloud Run otherwise 307-redirects and most
-MCP clients don't follow the redirect.
+A browser opens for Google sign-in (restricted to `@gastroduce-japan.co.jp`),
+and that's it. Tokens are minted, stored, and rotated by the MCP client.
 
-See [`docs/MCP.md`](docs/MCP.md) for tokens, other clients, and tool
-schemas.
+The trailing slash matters — Cloud Run otherwise 307-redirects.
+
+See [`docs/MCP.md`](docs/MCP.md) for the claude.ai connector flow, Claude
+Desktop / Cursor config, and the Personal Access Token path for CI scripts.
 
 ## Stack
 

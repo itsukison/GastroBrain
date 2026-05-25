@@ -20,6 +20,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 
 from gastrobrain.config import get_settings
 from gastrobrain.db import conn
+from gastrobrain.oauth import router as oauth_router
 from gastrobrain.pipeline import run_pipeline_for_slack
 from gastrobrain.retrieve import RetrievalStats, RetrievedChunk
 from gastrobrain.slack_format import assign_source_numbers, split_to_section_blocks, to_slack_mrkdwn
@@ -58,6 +59,7 @@ async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(lifespan=_lifespan)
 app.include_router(web_router)
+app.include_router(oauth_router)
 
 if _mcp_enabled:
     from gastrobrain.mcp_server import build_mcp_asgi_app

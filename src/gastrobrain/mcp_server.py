@@ -184,21 +184,39 @@ _current_token_label: contextvars.ContextVar[str | None] = contextvars.ContextVa
 )
 
 
+def _www_authenticate_header() -> str:
+    """RFC 9728 — point unauthenticated MCP clients at our protected-resource
+    metadata so they can discover the AS and start an OAuth flow. Static-token
+    clients can ignore this and just see a regular 401."""
+    from gastrobrain.config import get_settings
+
+    issuer = get_settings().gastrobrain_oauth_issuer.rstrip("/")
+    if not issuer:
+        return 'Bearer realm="gastrobrain-mcp"'
+    return (
+        f'Bearer realm="gastrobrain-mcp", '
+        f'resource_metadata="{issuer}/.well-known/oauth-protected-resource"'
+    )
+
+
 class BearerAuthMiddleware(BaseHTTPMiddleware):
     """Reject requests without a valid `Authorization: Bearer <token>` header.
 
     Token check is constant-time (hmac.compare_digest). Successful auth
     stashes the token label in a contextvar so the tool body can read it
     for telemetry. Failure returns a plain 401 — no JSON-RPC envelope,
-    because the JSON-RPC layer hasn't started yet."""
+    because the JSON-RPC layer hasn't started yet. The WWW-Authenticate
+    header includes `resource_metadata` per RFC 9728 so MCP clients can
+    discover our OAuth AS and start the auth flow themselves."""
 
     async def dispatch(self, request: Request, call_next):
         auth = request.headers.get("authorization", "")
+        www_auth = _www_authenticate_header()
         if not auth.lower().startswith("bearer "):
             return JSONResponse(
                 {"error": "missing or malformed Authorization header"},
                 status_code=401,
-                headers={"WWW-Authenticate": "Bearer"},
+                headers={"WWW-Authenticate": www_auth},
             )
         token = auth.split(" ", 1)[1].strip()
         try:
@@ -208,7 +226,7 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
             return JSONResponse(
                 {"error": "invalid token"},
                 status_code=401,
-                headers={"WWW-Authenticate": "Bearer"},
+                headers={"WWW-Authenticate": www_auth},
             )
         reset_token = _current_token_label.set(label)
         try:

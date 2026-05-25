@@ -15,7 +15,9 @@ echo "Project: $PROJECT  Region: $REGION  Service: $SERVICE"
 echo ""
 
 OPTIONAL_SECRETS=()
-for s in LANGFUSE_PUBLIC_KEY LANGFUSE_SECRET_KEY GASTROBRAIN_MCP_TOKENS; do
+for s in LANGFUSE_PUBLIC_KEY LANGFUSE_SECRET_KEY GASTROBRAIN_MCP_TOKENS \
+         GOOGLE_OAUTH_CLIENT_ID GOOGLE_OAUTH_CLIENT_SECRET \
+         GASTROBRAIN_OAUTH_JWT_KEY GASTROBRAIN_OAUTH_STATE_KEY; do
   if gcloud secrets describe "$s" >/dev/null 2>&1; then
     OPTIONAL_SECRETS+=("$s=$s:latest")
   fi
@@ -50,7 +52,7 @@ gcloud run deploy "$SERVICE" \
   --max-instances 3 \
   --timeout 60 \
   --concurrency 8 \
-  --set-env-vars "ENV=prod,LANGFUSE_BASE_URL=https://jp.cloud.langfuse.com,ANTHROPIC_MODEL=claude-sonnet-4-6,EMBEDDING_MODEL=embed-multilingual-v3.0,RERANK_MODEL=rerank-multilingual-v3.0" \
+  --set-env-vars "ENV=prod,LANGFUSE_BASE_URL=https://jp.cloud.langfuse.com,ANTHROPIC_MODEL=claude-sonnet-4-6,EMBEDDING_MODEL=embed-multilingual-v3.0,RERANK_MODEL=rerank-multilingual-v3.0,GASTROBRAIN_OAUTH_ISSUER=https://gastrobrain-rjp7bbdhta-an.a.run.app" \
   --set-secrets "$SECRETS_CSV"
 
 URL=$(gcloud run services describe "$SERVICE" --region "$REGION" --format='value(status.url)')

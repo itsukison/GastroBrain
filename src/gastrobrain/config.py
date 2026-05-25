@@ -41,6 +41,18 @@ class Settings(BaseSettings):
     gastrobrain_mcp_tokens: str = ""
     gastrobrain_mcp_enabled: bool = True
 
+    # OAuth 2.1 authorization server for /mcp/ — see oauth.py.
+    # Empty client_id disables the OAuth surface (static tokens still work).
+    google_oauth_client_id: str = ""
+    google_oauth_client_secret: str = ""
+    # HMAC keys. Mint with: python -c "import secrets; print(secrets.token_urlsafe(64))"
+    # Separate keys so a compromise of one doesn't forge the other.
+    gastrobrain_oauth_jwt_key: str = ""
+    gastrobrain_oauth_state_key: str = ""
+    # The public-facing base URL of this Cloud Run service. Used as the OAuth
+    # issuer and as the audience for access tokens. No trailing slash.
+    gastrobrain_oauth_issuer: str = ""
+
     chunk_target_chars: int = 500
     chunk_overlap_chars: int = 80
     retrieve_top_k_dense: int = 50
