@@ -1,0 +1,49 @@
+# Managers whose NotePM authorship qualifies a page for ingestion.
+#
+# Filter rule (applied in gastrobrain.notepm_cli):
+#   ingest a page iff  updated_at >= notepm_cutoff_date
+#                  AND (created_by.user_code OR updated_by.user_code) ∈ resolved_codes
+#
+# Resolution: name_ja is matched against NotePM's user list (NFKC + whitespace-stripped + lowercased).
+# email is used as a fallback when name_ja is missing or ambiguous.
+# Run `gb-notepm-dryrun` to verify the mapping before any ingestion.
+#
+# Append / remove names as the org changes, then re-run the dry-run.
+# Kanji shown here is the spelling provided 2026-05-25 by Itsuki; some entries
+# (notably 渡邉 vs 渡邊, full-width vs half-width spaces) may need adjustment
+# after the first dry-run reports unmatched.
+
+managers:
+  - name_en: Itsuki Son
+    email: itsuki.son@gastroduce-japan.co.jp
+  - name_ja: 江頭 舞
+    name_en: egashira mai
+  - name_ja: 高山恵理
+    name_en: eri takayama
+  - name_ja: 高尾鈴栞
+    name_en: Takao Suzuka
+  - name_ja: 若松友貴
+    name_en: wakamatsu tomoki
+  - name_ja: 秋田陽平
+    name_en: akita yohei
+  - name_ja: 緒方若菜
+    name_en: ogata wakana
+  - name_ja: 上間はるな
+    name_en: uema haruna
+  - name_ja: 秦 幸生
+    name_en: Kosei Noah HATA
+    email: kosei.hata@gastroduce-japan.co.jp
+  - name_ja: 西田伊織
+    name_en: nishida iori
+  - name_ja: 倉田翼
+    name_en: kurata tsubasa
+  - name_ja: 草壁 匠
+    name_en: Kusakabe Sho
+  - name_ja: 若松拓弥
+    name_en: wakamatsu takuya
+  - name_ja: 渡邉大輔
+    name_en: watanabe daisuke
+  - name_ja: 福元ゆあ
+    name_en: yua fukumoto
+  - name_ja: 堀江隆文
+    name_en: horie takafumi

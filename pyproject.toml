@@ -33,6 +33,7 @@ dependencies = [
 gb-ingest = "gastrobrain.ingest:app"
 gb-ask = "gastrobrain.ask:app"
 gb-chat = "gastrobrain.chat:app"
+gb-notepm-dryrun = "gastrobrain.notepm_cli:cli"
 
 [build-system]
 requires = ["hatchling"]

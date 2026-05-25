@@ -455,10 +455,14 @@ async def google_callback(request: Request) -> Any:
         return _ineligible_html("Google との認証情報の交換に失敗しました。")
     body = resp.json()
     id_token = body.get("id_token")
+    google_access_token = body.get("access_token")
     if not id_token:
         return _ineligible_html("Google が id_token を返しませんでした。")
 
-    # Verify Google's id_token signature via their JWKS.
+    # Verify Google's id_token signature via their JWKS. We pass access_token
+    # so jose can validate the at_hash claim — otherwise it raises
+    # "No access_token provided to compare against at_hash claim". We don't
+    # otherwise use Google's access_token (we only need the user's identity).
     try:
         async with httpx.AsyncClient(timeout=5) as client:
             jwks = (await client.get(GOOGLE_JWKS_URI)).json()
@@ -472,7 +476,8 @@ async def google_callback(request: Request) -> Any:
             key,
             algorithms=[header.get("alg", "RS256")],
             audience=s.google_oauth_client_id,
-            issuer=["https://accounts.google.com", "accounts.google.com"],
+            issuer="https://accounts.google.com",
+            access_token=google_access_token,
             options={"require_sub": True, "require_exp": True},
         )
     except JWTError as exc:

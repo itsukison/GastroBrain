@@ -34,6 +34,12 @@ class Settings(BaseSettings):
 
     supabase_jwt_secret: str = ""
     supabase_project_url: str = ""
+
+    notepm_api_token: str = Field(default="", alias="NOTEPM_API_TOKEN")
+    notepm_team_subdomain: str = "gastroduce-jp"
+    notepm_cutoff_date: str = "2025-11-25"
+    notepm_managers_file: Path = PROJECT_ROOT / "config" / "notepm_managers.yaml"
+
     web_history_window: int = 10
     web_allowed_origins: str = ""
 
