@@ -206,15 +206,29 @@ def verify_access_token(token: str) -> str | None:
 # --------------------------------------------------------------------------------------
 
 
-@router.get("/.well-known/oauth-protected-resource")
-async def protected_resource_metadata() -> dict[str, Any]:
-    """RFC 9728 — tells MCP clients which AS protects this resource."""
+def _prm_payload() -> dict[str, Any]:
     return {
         "resource": _resource_url(),
         "authorization_servers": [_issuer()],
         "scopes_supported": SUPPORTED_SCOPES,
         "bearer_methods_supported": ["header"],
     }
+
+
+@router.get("/.well-known/oauth-protected-resource")
+async def protected_resource_metadata() -> dict[str, Any]:
+    """RFC 9728 — tells MCP clients which AS protects this resource."""
+    return _prm_payload()
+
+
+@router.get("/.well-known/oauth-protected-resource/mcp")
+async def protected_resource_metadata_at_path() -> dict[str, Any]:
+    """Per-resource variant per RFC 9728 §3.1: for resources whose URL has a
+    path component, the metadata URL should reflect that path. claude.ai's
+    connector checks this URL first and falls back to the path-less variant
+    only on 404 — serving both removes a (harmless but noisy) 404 from the
+    flow."""
+    return _prm_payload()
 
 
 @router.get("/.well-known/oauth-authorization-server")

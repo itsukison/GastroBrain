@@ -61,10 +61,29 @@ app = FastAPI(lifespan=_lifespan)
 app.include_router(web_router)
 app.include_router(oauth_router)
 
+
+class _MCPSlashFixMiddleware:
+    """Some MCP clients (notably claude.ai connectors) request `/mcp` without
+    the trailing slash, even though our resource metadata declares `/mcp/`.
+    Starlette would 307 these to `/mcp/`, but most clients refuse to follow
+    POST redirects, so they surface a misleading "authorization failed".
+    Rewrite the path internally so both `/mcp` and `/mcp/` reach the MCP app
+    without any redirect."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http" and scope.get("path") == "/mcp":
+            scope = {**scope, "path": "/mcp/", "raw_path": b"/mcp/"}
+        await self.app(scope, receive, send)
+
+
 if _mcp_enabled:
     from gastrobrain.mcp_server import build_mcp_asgi_app
 
     app.mount("/mcp", build_mcp_asgi_app())
+    app.add_middleware(_MCPSlashFixMiddleware)
 
 
 @app.exception_handler(Exception)
