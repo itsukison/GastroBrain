@@ -16,6 +16,7 @@ import logging
 import time
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -44,6 +45,13 @@ mcp = FastMCP(
     # at "/mcp" in slack_app, so collapse the inner path to "/" to avoid
     # "/mcp/mcp" being the real endpoint.
     streamable_http_path="/",
+    # DNS-rebinding protection is on by default and rejects any Host header
+    # not on its allowlist (default: localhost only). Cloud Run serves us
+    # under multiple host aliases that change across revisions, so we disable
+    # the check — the BearerAuthMiddleware below already gates every request.
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=False,
+    ),
 )
 
 
