@@ -1,0 +1,17 @@
+# Notebooks excluded from Gastrobrain ingestion.
+# Pages whose `note_code` appears below are skipped regardless of author/cutoff.
+# To add: append a `- code: <note_code>  # <name>` entry. To remove: delete the line.
+# Notebook codes are stable; list via `gb-notepm-dryrun` or NotePM API /notes.
+
+excluded:
+  # HR / 人事情報
+  - code: "613210bb2b"  # 031_人事労務
+  - code: "d27428ba5c"  # 033-1_社内人事(部長)
+  - code: "e73fe37015"  # 033-2_社内人事(マネージャー)
+  - code: "549d5395d0"  # 033-3_社内人事(メンバー)
+  - code: "ed0219e0cf"  # 033_採用全般
+  # Accounting / 経理
+  - code: "db12c0ce2b"  # 030_経理
+  - code: "113009bc0a"  # 030-1_経理-マネージャー連携
+  # Legal / 法務
+  - code: "c6956c8718"  # 023_法務

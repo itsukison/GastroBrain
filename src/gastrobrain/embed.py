@@ -1,4 +1,5 @@
 import cohere
+import httpx
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from gastrobrain.config import settings
@@ -9,14 +10,23 @@ _client: cohere.ClientV2 | None = None
 def _get_client() -> cohere.ClientV2:
     global _client
     if _client is None:
-        _client = cohere.ClientV2(api_key=settings.cohere_api)
+        # 60s per request — catches ghosted TCP connections (laptop sleep, NAT timeout)
+        # so the retry decorator can re-establish instead of hanging forever.
+        _client = cohere.ClientV2(api_key=settings.cohere_api, timeout=60.0)
     return _client
 
 
+_RETRYABLE_EMBED = (
+    cohere.errors.TooManyRequestsError,
+    cohere.errors.InternalServerError,
+    httpx.TransportError,  # covers RemoteProtocolError, ConnectError, ReadError, etc.
+)
+
+
 @retry(
-    stop=stop_after_attempt(4),
-    wait=wait_exponential(multiplier=1, min=1, max=20),
-    retry=retry_if_exception_type((cohere.errors.TooManyRequestsError, cohere.errors.InternalServerError)),
+    stop=stop_after_attempt(6),
+    wait=wait_exponential(multiplier=2, min=2, max=65),
+    retry=retry_if_exception_type(_RETRYABLE_EMBED),
     reraise=True,
 )
 def embed_texts(texts: list[str], input_type: str) -> list[list[float]]:
@@ -38,7 +48,7 @@ def embed_texts(texts: list[str], input_type: str) -> list[list[float]]:
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=1, max=10),
-    retry=retry_if_exception_type((cohere.errors.TooManyRequestsError, cohere.errors.InternalServerError)),
+    retry=retry_if_exception_type(_RETRYABLE_EMBED),
     reraise=True,
 )
 def rerank(query: str, documents: list[str], top_n: int) -> list[tuple[int, float]]:

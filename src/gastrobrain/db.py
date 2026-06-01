@@ -45,6 +45,7 @@ def get_pool() -> ConnectionPool:
             max_size=8,
             kwargs={"autocommit": False},
             configure=_configure,
+            check=ConnectionPool.check_connection,
         )
     return _pool
 

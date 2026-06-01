@@ -37,8 +37,9 @@ class Settings(BaseSettings):
 
     notepm_api_token: str = Field(default="", alias="NOTEPM_API_TOKEN")
     notepm_team_subdomain: str = "gastroduce-jp"
-    notepm_cutoff_date: str = "2025-11-25"
+    notepm_cutoff_date: str = "2024-05-26"
     notepm_managers_file: Path = PROJECT_ROOT / "config" / "notepm_managers.yaml"
+    notepm_excluded_notes_file: Path = PROJECT_ROOT / "config" / "notepm_excluded_notes.yaml"
 
     web_history_window: int = 10
     web_allowed_origins: str = ""

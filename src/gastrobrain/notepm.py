@@ -102,7 +102,7 @@ class NotePMClient:
         url = path_or_url if is_full_url else f"{self._base}{path_or_url}"
         try:
             resp = self._http.get(url, params=None if is_full_url else params)
-        except (httpx.TimeoutException, httpx.NetworkError) as e:
+        except httpx.TransportError as e:
             raise _Retryable(f"{type(e).__name__}: {e}") from e
         if resp.status_code == 429 or 500 <= resp.status_code < 600:
             raise _Retryable(f"HTTP {resp.status_code}: {resp.text[:200]}")
@@ -124,6 +124,19 @@ class NotePMClient:
             next_url = (data.get("meta") or {}).get("next_page")
             if not next_url:
                 return
+
+    def list_notes(self) -> dict[str, str]:
+        """Return note_code → note name. Used to populate folder_path
+        (NotePM's REST API doesn't expose a hierarchical path on /pages)."""
+        notes: dict[str, str] = {}
+        next_url: str | None = None
+        while True:
+            data = self._get(next_url) if next_url else self._get("/notes", per_page=100)
+            for n in data.get("notes", []):
+                notes[n["note_code"]] = n.get("name", "")
+            next_url = (data.get("meta") or {}).get("next_page")
+            if not next_url:
+                return notes
 
     def list_pages(self, per_page: int = 100) -> Iterator[Page]:
         next_url: str | None = None

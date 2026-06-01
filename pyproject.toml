@@ -34,6 +34,7 @@ gb-ingest = "gastrobrain.ingest:app"
 gb-ask = "gastrobrain.ask:app"
 gb-chat = "gastrobrain.chat:app"
 gb-notepm-dryrun = "gastrobrain.notepm_cli:cli"
+gb-notepm-ingest = "gastrobrain.notepm_cli:ingest_cli"
 
 [build-system]
 requires = ["hatchling"]
