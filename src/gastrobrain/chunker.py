@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass
 
 from markdown_it import MarkdownIt
@@ -184,3 +185,96 @@ def _split_long(text: str, target: int, overlap: int) -> list[str]:
             break
         start = end - overlap
     return pieces
+
+
+# A line like "緒方若菜 00:00" or "ハイタッチまつもと 17:16" — speaker name,
+# whitespace, then mm:ss (optionally hh:mm:ss). Auto-generated Meet/Gemini
+# transcripts use this to delimit turns; the summary/audit section above the
+# first such line has none (its colons are full-width or in "22/60"-style scores).
+_SPEAKER_RE = re.compile(r"^.{1,40}?\s+\d{1,2}:\d{2}(?::\d{2})?$")
+
+
+def chunk_transcript(text: str) -> list[Chunk]:
+    """Chunker for auto-generated meeting transcripts (no markdown headings).
+
+    Each file is `<summary + AI audit report>` followed by a speaker-by-speaker
+    transcript. We split at the first speaker line, then pack each section
+    independently: the head by paragraph, the transcript by speaker turn. Each
+    chunk is tagged with its section (要約・監査 / 文字起こし) so retrieval and
+    citations carry that context, mirroring chunk_markdown's heading prefix.
+    """
+    head, transcript = _split_head_transcript(text)
+    target = settings.chunk_target_chars
+    overlap = settings.chunk_overlap_chars
+
+    out: list[Chunk] = []
+    sections = [
+        ("要約・監査", _paragraphs(head)),
+        ("文字起こし", _speaker_turns(transcript)),
+    ]
+    for label, units in sections:
+        for piece in _pack_units(units, target, overlap):
+            out.append(
+                Chunk(ordinal=len(out), heading_path=[label], content=f"[{label}]\n{piece}")
+            )
+    return out
+
+
+def _split_head_transcript(text: str) -> tuple[str, str]:
+    lines = text.splitlines()
+    for idx, line in enumerate(lines):
+        if _SPEAKER_RE.match(line.strip()):
+            return "\n".join(lines[:idx]).strip(), "\n".join(lines[idx:]).strip()
+    return text.strip(), ""
+
+
+def _paragraphs(text: str) -> list[str]:
+    if not text:
+        return []
+    return [p for p in re.split(r"\n\s*\n", text) if p.strip()]
+
+
+def _speaker_turns(text: str) -> list[str]:
+    if not text:
+        return []
+    turns: list[str] = []
+    cur: list[str] = []
+    for line in text.splitlines():
+        if _SPEAKER_RE.match(line.strip()) and cur:
+            turns.append("\n".join(cur))
+            cur = [line]
+        else:
+            cur.append(line)
+    if cur:
+        turns.append("\n".join(cur))
+    return [t for t in turns if t.strip()]
+
+
+def _pack_units(units: list[str], target: int, overlap: int) -> list[str]:
+    """Greedy-pack units to ~target chars; window any single oversize unit.
+    Same shape as _pack(), but for plain (non-markdown) unit lists."""
+    out: list[str] = []
+    buf: list[str] = []
+    buf_len = 0
+
+    def flush() -> None:
+        nonlocal buf, buf_len
+        if buf:
+            out.append("\n\n".join(buf))
+            buf = []
+            buf_len = 0
+
+    for unit in units:
+        unit = unit.strip()
+        if not unit:
+            continue
+        if len(unit) > target:
+            flush()
+            out.extend(_split_long(unit, target, overlap))
+            continue
+        if buf_len + len(unit) > target and buf:
+            flush()
+        buf.append(unit)
+        buf_len += len(unit)
+    flush()
+    return out

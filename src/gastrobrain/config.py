@@ -41,6 +41,12 @@ class Settings(BaseSettings):
     notepm_managers_file: Path = PROJECT_ROOT / "config" / "notepm_managers.yaml"
     notepm_excluded_notes_file: Path = PROJECT_ROOT / "config" / "notepm_excluded_notes.yaml"
 
+    # Google Drive — meeting-transcript ingestion (company-wide "全社権限" folder).
+    gdrive_folder_id: str = "16E6m0EBnir5jo9jrHZUQGmL7hHq9z8QE"
+    # If set, impersonate this service account (with drive.readonly) instead of
+    # using direct user ADC. Needed when the Workspace blocks user-OAuth Drive.
+    gdrive_impersonate_sa: str = Field(default="", alias="GDRIVE_IMPERSONATE_SA")
+
     web_history_window: int = 10
     web_allowed_origins: str = ""
 
