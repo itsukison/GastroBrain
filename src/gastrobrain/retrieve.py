@@ -38,8 +38,16 @@ class RetrievalStats:
     elapsed_rerank_ms: int = 0
 
 
-def retrieve_candidates(question: str, stats: RetrievalStats | None = None) -> list[CandidateChunk]:
-    """Dense + lexical search → RRF fusion. Returns top-k_fused candidates."""
+def retrieve_candidates(
+    question: str, stats: RetrievalStats | None = None, max_level: int = 0
+) -> list[CandidateChunk]:
+    """Dense + lexical search → RRF fusion. Returns top-k_fused candidates.
+
+    `max_level` is the caller's clearance level (see gastrobrain.access). Only
+    documents with `min_level <= max_level` are searched, so restricted docs
+    never enter the candidate set — they can't be retrieved, reranked, or cited.
+    Defaults to 0 (unrestricted-only) so any caller that forgets to pass a level
+    fails closed rather than open."""
     import time
 
     settings = get_settings()
@@ -53,10 +61,11 @@ def retrieve_candidates(question: str, stats: RetrievalStats | None = None) -> l
             FROM chunks c
             JOIN documents d ON d.id = c.doc_id
             WHERE d.deleted_at IS NULL
+              AND d.min_level <= %s
             ORDER BY c.embedding <=> %s::vector
             LIMIT %s
             """,
-            (query_vec, settings.retrieve_top_k_dense),
+            (max_level, query_vec, settings.retrieve_top_k_dense),
         )
         dense = cur.fetchall()
 
@@ -66,11 +75,12 @@ def retrieve_candidates(question: str, stats: RetrievalStats | None = None) -> l
             FROM chunks c
             JOIN documents d ON d.id = c.doc_id
             WHERE d.deleted_at IS NULL
+              AND d.min_level <= %s
               AND c.content &@~ %s
             ORDER BY pgroonga_score(c.tableoid, c.ctid) DESC
             LIMIT %s
             """,
-            (question, settings.retrieve_top_k_lexical),
+            (max_level, question, settings.retrieve_top_k_lexical),
         )
         lexical = cur.fetchall()
 
@@ -128,9 +138,10 @@ def rerank_candidates(
     return out
 
 
-def retrieve(question: str) -> list[RetrievedChunk]:
-    """Convenience wrapper: candidates + rerank in one call. Used by the CLI."""
-    candidates = retrieve_candidates(question)
+def retrieve(question: str, max_level: int = 0) -> list[RetrievedChunk]:
+    """Convenience wrapper: candidates + rerank in one call. Used by the CLI and
+    the MCP surface. `max_level` gates which documents are searchable."""
+    candidates = retrieve_candidates(question, max_level=max_level)
     return rerank_candidates(question, candidates)
 
 

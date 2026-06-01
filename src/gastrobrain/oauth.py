@@ -178,15 +178,13 @@ def _mint_access_token(*, user_id: UUID, email: str, client_id: UUID, scope: str
     )
 
 
-def verify_access_token(token: str) -> str | None:
-    """Validate an OAuth access token (JWT). Returns the telemetry label on
-    success, None otherwise. Used by auth.verify_service_token as a third
-    auth path for /mcp/."""
+def _decode_access_token(token: str) -> dict | None:
+    """Validate an OAuth access token (JWT) and return its claims, or None."""
     s = get_settings()
     if not s.gastrobrain_oauth_jwt_key.strip():
         return None
     try:
-        claims = jwt.decode(
+        return jwt.decode(
             token,
             s.gastrobrain_oauth_jwt_key,
             algorithms=["HS256"],
@@ -197,8 +195,24 @@ def verify_access_token(token: str) -> str | None:
     except JWTError as exc:
         log.info("oauth access token rejected: %s", exc)
         return None
+
+
+def verify_access_token(token: str) -> str | None:
+    """Validate an OAuth access token. Returns the telemetry label, or None."""
+    claims = _decode_access_token(token)
+    if claims is None:
+        return None
+    return claims.get("label") or _label_from_email(claims.get("email", ""))
+
+
+def verify_access_token_identity(token: str) -> tuple[str, str | None] | None:
+    """Validate an OAuth access token and return (label, email), or None. The
+    email drives clearance-level resolution in auth.verify_service_token."""
+    claims = _decode_access_token(token)
+    if claims is None:
+        return None
     label = claims.get("label") or _label_from_email(claims.get("email", ""))
-    return label
+    return label, claims.get("email")
 
 
 # --------------------------------------------------------------------------------------

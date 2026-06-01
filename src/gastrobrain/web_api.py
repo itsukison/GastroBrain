@@ -23,6 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
+from gastrobrain.access import is_admin, recompute_document_levels
 from gastrobrain.auth import AuthUser, require_user
 from gastrobrain.config import get_settings
 from gastrobrain.db import conn
@@ -418,7 +419,7 @@ async def chat(body: ChatBody, user: AuthUser = Depends(require_user)) -> EventS
 
     # Verify ownership + load history + load prefs before opening the stream.
     # Failing fast here surfaces 4xx instead of a half-rendered SSE.
-    def _prep() -> tuple[list[HistoryTurn], UUID, UserPreferences | None]:
+    def _prep() -> tuple[list[HistoryTurn], UUID, UserPreferences | None, int]:
         with conn() as c, c.cursor() as cur:
             cur.execute(
                 """
@@ -429,6 +430,21 @@ async def chat(body: ChatBody, user: AuthUser = Depends(require_user)) -> EventS
             )
             if not cur.fetchone():
                 raise HTTPException(status_code=404, detail="thread not found")
+
+            # Clearance level (gates which docs retrieval may surface). Resolved
+            # by email — the universal identity across web/Slack/MCP. No member
+            # row or no role → 0 (unrestricted-only).
+            cur.execute(
+                """
+                SELECT COALESCE((
+                    SELECT r.level FROM members m
+                    LEFT JOIN roles r ON r.id = m.role_id
+                    WHERE m.email = lower(%s)
+                ), 0)
+                """,
+                (user.email,),
+            )
+            max_level = int(cur.fetchone()[0])
 
             cur.execute(
                 """
@@ -466,11 +482,11 @@ async def chat(body: ChatBody, user: AuthUser = Depends(require_user)) -> EventS
                 prefs = None
 
             c.commit()
-            return history, user_msg_id, prefs
+            return history, user_msg_id, prefs, max_level
 
     log.info("chat: prep start conversation=%s user=%s", body.conversation_id, user.user_id)
-    history, _, prefs = await asyncio.to_thread(_prep)
-    log.info("chat: prep done history_len=%d prefs=%s", len(history), prefs)
+    history, _, prefs, max_level = await asyncio.to_thread(_prep)
+    log.info("chat: prep done history_len=%d prefs=%s level=%d", len(history), prefs, max_level)
 
     async def _events():
         # Emit immediately so the client can distinguish "Cloud Run accepted +
@@ -483,6 +499,7 @@ async def chat(body: ChatBody, user: AuthUser = Depends(require_user)) -> EventS
                 history=history,
                 surface="web",
                 prefs=prefs,
+                max_level=max_level,
             )
             final: AnswerDone | None = None
             token_count = 0
@@ -745,6 +762,279 @@ async def submit_feedback(
             return {"ok": True, "query_id": str(query_id), "rating": body.rating}
 
     return await asyncio.to_thread(_do)
+
+
+# --------------------------------------------------------------------------------------
+# Org view — role + folder-access management (admin only)
+# --------------------------------------------------------------------------------------
+#
+# This is the single control surface for access. Changing a member's role or a
+# folder's required level here takes effect across EVERY surface (web chat, Slack
+# bot, MCP) because they all resolve clearance from these same tables at query
+# time. Folder-rule edits re-stamp documents.min_level via recompute.
+
+
+async def require_admin(user: AuthUser = Depends(require_user)) -> AuthUser:
+    """FastAPI dependency: 403 unless the caller is an org admin."""
+    if not await asyncio.to_thread(is_admin, user.email):
+        raise HTTPException(status_code=403, detail="admin only")
+    return user
+
+
+class OrgMeOut(BaseModel):
+    email: str | None
+    level: int
+    is_admin: bool
+
+
+class RoleOut(BaseModel):
+    id: int
+    name: str
+    level: int
+
+
+class MemberOut(BaseModel):
+    email: str
+    role_id: int | None
+    role_name: str | None
+    level: int | None
+    is_admin: bool
+    last_sign_in_at: str | None
+
+
+class MemberPatchBody(BaseModel):
+    role_id: int | None = None  # null clears the role (→ level 0)
+    is_admin: bool | None = None
+
+
+class FolderRuleOut(BaseModel):
+    id: UUID
+    folder_prefix: list[str]
+    min_level: int
+    note: str | None
+
+
+class FolderOut(BaseModel):
+    folder_path: list[str]
+    n_docs: int
+    effective_min_level: int
+
+
+class FolderAclBody(BaseModel):
+    folder_prefix: list[str] = Field(min_length=1)
+    min_level: int = Field(ge=1, le=4)
+    note: str | None = Field(default=None, max_length=300)
+
+
+@router.get("/org/me", response_model=OrgMeOut)
+async def org_me(user: AuthUser = Depends(require_user)) -> OrgMeOut:
+    """Any logged-in user: their own level + whether they may open the org view."""
+    def _do() -> dict:
+        with conn() as c, c.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                  COALESCE((SELECT r.level FROM members m
+                            LEFT JOIN roles r ON r.id = m.role_id
+                            WHERE m.email = lower(%s)), 0),
+                  COALESCE((SELECT is_admin FROM members WHERE email = lower(%s)), false)
+                """,
+                (user.email, user.email),
+            )
+            level, admin = cur.fetchone()
+            return {"email": user.email, "level": int(level), "is_admin": bool(admin)}
+
+    return OrgMeOut(**await asyncio.to_thread(_do))
+
+
+@router.get("/org/roles")
+async def org_roles(_: AuthUser = Depends(require_admin)) -> dict[str, list[dict]]:
+    def _do() -> list[dict]:
+        with conn() as c, c.cursor() as cur:
+            cur.execute("SELECT id, name, level FROM roles ORDER BY level")
+            return [{"id": r[0], "name": r[1], "level": r[2]} for r in cur.fetchall()]
+
+    return {"roles": await asyncio.to_thread(_do)}
+
+
+@router.get("/org/members")
+async def org_members(_: AuthUser = Depends(require_admin)) -> dict[str, list[dict]]:
+    """Everyone who has logged into the web app OR has a member row (covers
+    pre-provisioned / Slack-only people), with their assigned role + admin flag."""
+    def _do() -> list[dict]:
+        with conn() as c, c.cursor() as cur:
+            cur.execute(
+                """
+                WITH emails AS (
+                    SELECT lower(email) AS email FROM auth.users WHERE email IS NOT NULL
+                    UNION
+                    SELECT email FROM members
+                ),
+                signin AS (
+                    SELECT lower(email) AS email, max(last_sign_in_at) AS last_sign_in_at
+                    FROM auth.users WHERE email IS NOT NULL GROUP BY lower(email)
+                )
+                SELECT e.email, m.role_id, r.name, r.level,
+                       COALESCE(m.is_admin, false), s.last_sign_in_at
+                FROM emails e
+                LEFT JOIN members m ON m.email = e.email
+                LEFT JOIN roles r ON r.id = m.role_id
+                LEFT JOIN signin s ON s.email = e.email
+                ORDER BY e.email
+                """
+            )
+            return [
+                {
+                    "email": r[0],
+                    "role_id": r[1],
+                    "role_name": r[2],
+                    "level": r[3],
+                    "is_admin": r[4],
+                    "last_sign_in_at": r[5].isoformat() if r[5] else None,
+                }
+                for r in cur.fetchall()
+            ]
+
+    return {"members": await asyncio.to_thread(_do)}
+
+
+@router.put("/org/members/{email}", response_model=MemberOut)
+async def update_member(
+    email: str,
+    body: MemberPatchBody,
+    _: AuthUser = Depends(require_admin),
+) -> MemberOut:
+    email = email.strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="email required")
+
+    def _do() -> dict:
+        with conn() as c, c.cursor() as cur:
+            # Validate role_id if provided.
+            if body.role_id is not None:
+                cur.execute("SELECT 1 FROM roles WHERE id = %s", (body.role_id,))
+                if not cur.fetchone():
+                    raise HTTPException(status_code=400, detail="invalid role_id")
+
+            cur.execute("SELECT role_id, is_admin FROM members WHERE email = %s", (email,))
+            existing = cur.fetchone()
+            cur_role = existing[0] if existing else None
+            cur_admin = existing[1] if existing else False
+
+            # Honour an explicit null (clear role) vs an omitted field.
+            new_role = body.role_id if "role_id" in body.model_fields_set else cur_role
+            new_admin = body.is_admin if body.is_admin is not None else cur_admin
+
+            # Never let the org lock itself out: block removing the last admin.
+            if cur_admin and not new_admin:
+                cur.execute(
+                    "SELECT count(*) FROM members WHERE is_admin AND email <> %s", (email,)
+                )
+                if cur.fetchone()[0] == 0:
+                    raise HTTPException(status_code=400, detail="cannot remove the last admin")
+
+            cur.execute(
+                """
+                INSERT INTO members (email, role_id, is_admin, updated_at)
+                VALUES (%s, %s, %s, now())
+                ON CONFLICT (email) DO UPDATE
+                    SET role_id = EXCLUDED.role_id,
+                        is_admin = EXCLUDED.is_admin,
+                        updated_at = now()
+                """,
+                (email, new_role, new_admin),
+            )
+            cur.execute(
+                """
+                SELECT m.email, m.role_id, r.name, r.level, m.is_admin
+                FROM members m LEFT JOIN roles r ON r.id = m.role_id
+                WHERE m.email = %s
+                """,
+                (email,),
+            )
+            r = cur.fetchone()
+            c.commit()
+            return {
+                "email": r[0], "role_id": r[1], "role_name": r[2],
+                "level": r[3], "is_admin": r[4], "last_sign_in_at": None,
+            }
+
+    return MemberOut(**await asyncio.to_thread(_do))
+
+
+@router.get("/org/folders")
+async def org_folders(_: AuthUser = Depends(require_admin)) -> dict[str, list[dict]]:
+    """The corpus folder tree (distinct folder_path with doc counts + current
+    effective level) plus the explicit folder_acl rules driving them."""
+    def _do() -> dict[str, list[dict]]:
+        with conn() as c, c.cursor() as cur:
+            cur.execute(
+                """
+                SELECT folder_path, count(*), max(min_level)
+                FROM documents
+                WHERE deleted_at IS NULL AND cardinality(folder_path) >= 1
+                GROUP BY folder_path
+                ORDER BY folder_path
+                """
+            )
+            folders = [
+                {"folder_path": r[0], "n_docs": r[1], "effective_min_level": r[2]}
+                for r in cur.fetchall()
+            ]
+            cur.execute(
+                "SELECT id, folder_prefix, min_level, note FROM folder_acl ORDER BY folder_prefix"
+            )
+            rules = [
+                {"id": str(r[0]), "folder_prefix": r[1], "min_level": r[2], "note": r[3]}
+                for r in cur.fetchall()
+            ]
+            return {"folders": folders, "rules": rules}
+
+    return await asyncio.to_thread(_do)
+
+
+@router.post("/org/folder-acl", response_model=FolderRuleOut)
+async def upsert_folder_acl(
+    body: FolderAclBody,
+    user: AuthUser = Depends(require_admin),
+) -> FolderRuleOut:
+    """Set (or update) the minimum clearance level for a folder. Upserts by
+    folder_prefix, then re-stamps documents.min_level so the change is live
+    on every surface immediately."""
+    def _do() -> dict:
+        with conn() as c, c.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO folder_acl (folder_prefix, min_level, note, created_by)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (folder_prefix) DO UPDATE
+                    SET min_level = EXCLUDED.min_level,
+                        note = EXCLUDED.note,
+                        updated_at = now()
+                RETURNING id, folder_prefix, min_level, note
+                """,
+                (body.folder_prefix, body.min_level, body.note, user.email),
+            )
+            r = cur.fetchone()
+            c.commit()
+            return {"id": r[0], "folder_prefix": r[1], "min_level": r[2], "note": r[3]}
+
+    result = await asyncio.to_thread(_do)
+    await asyncio.to_thread(recompute_document_levels)
+    return FolderRuleOut(**result)
+
+
+@router.delete("/org/folder-acl/{rule_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_folder_acl(rule_id: UUID, _: AuthUser = Depends(require_admin)) -> None:
+    def _do() -> None:
+        with conn() as c, c.cursor() as cur:
+            cur.execute("DELETE FROM folder_acl WHERE id = %s", (str(rule_id),))
+            if cur.rowcount == 0:
+                raise HTTPException(status_code=404, detail="rule not found")
+            c.commit()
+
+    await asyncio.to_thread(_do)
+    await asyncio.to_thread(recompute_document_levels)
 
 
 # --------------------------------------------------------------------------------------

@@ -102,7 +102,7 @@ def search_knowledge(
     top_k = max(1, min(int(top_k), 20))
     min_score = max(0.0, min(float(min_score), 1.0))
 
-    chunks = retrieve(query)
+    chunks = retrieve(query, max_level=_current_level.get())
 
     out: list[dict] = []
     for c in chunks:
@@ -182,6 +182,11 @@ def _log_query(*, query: str, returned: list[dict], latency_ms: int) -> None:
 _current_token_label: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "_current_token_label", default=None
 )
+# Clearance level of the authenticated caller, resolved in the auth middleware
+# and read by search_knowledge to gate retrieval. Default 0 = unrestricted-only.
+_current_level: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "_current_level", default=0
+)
 
 
 def _www_authenticate_header() -> str:
@@ -220,7 +225,7 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
             )
         token = auth.split(" ", 1)[1].strip()
         try:
-            label = verify_service_token(token)
+            resolved = verify_service_token(token)
         except ValueError as exc:
             log.info("mcp: rejected bearer (%s)", exc)
             return JSONResponse(
@@ -228,11 +233,13 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
                 status_code=401,
                 headers={"WWW-Authenticate": www_auth},
             )
-        reset_token = _current_token_label.set(label)
+        reset_label = _current_token_label.set(resolved.label)
+        reset_level = _current_level.set(resolved.level)
         try:
             return await call_next(request)
         finally:
-            _current_token_label.reset(reset_token)
+            _current_token_label.reset(reset_label)
+            _current_level.reset(reset_level)
 
 
 # --------------------------------------------------------------------------------------

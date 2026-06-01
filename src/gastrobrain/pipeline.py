@@ -110,6 +110,9 @@ class PipelineInput:
     history: list[HistoryTurn] = field(default_factory=list)
     surface: Surface = "web"
     prefs: UserPreferences | None = None
+    # Caller's clearance level (gastrobrain.access). Gates which documents are
+    # searchable. Defaults to 0 = unrestricted-only (fail-closed).
+    max_level: int = 0
 
 
 async def run_pipeline(inp: PipelineInput) -> AsyncIterator[PipelineEvent]:
@@ -136,7 +139,9 @@ async def run_pipeline(inp: PipelineInput) -> AsyncIterator[PipelineEvent]:
 
     # 2. Retrieval
     yield RetrievalStarted()
-    candidates = await asyncio.to_thread(retrieve_candidates, retrieval_query, stats)
+    candidates = await asyncio.to_thread(
+        retrieve_candidates, retrieval_query, stats, inp.max_level
+    )
     yield RetrievalDone(n_candidates=len(candidates), stats=stats)
 
     # 3. Rerank
@@ -207,11 +212,16 @@ async def run_pipeline_for_slack(
     update,
     insert_query,
     build_answer_blocks,
+    max_level: int = 0,
 ) -> UUID | None:
     """Drives `run_pipeline` and maps events to the Slack update() callback.
 
-    Returns the inserted query_id (or None if persistence failed)."""
-    inp = PipelineInput(question=question, user_id=user_id, history=[], surface="slack")
+    `max_level` is the Slack user's resolved clearance level (slack_app.py does
+    the Slack-id→email→level lookup). Returns the inserted query_id (or None if
+    persistence failed)."""
+    inp = PipelineInput(
+        question=question, user_id=user_id, history=[], surface="slack", max_level=max_level
+    )
 
     chunks: list[RetrievedChunk] = []
     final: AnswerDone | None = None

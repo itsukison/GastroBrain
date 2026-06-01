@@ -18,6 +18,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from slack_sdk.web.async_client import AsyncWebClient
 
+from gastrobrain.access import level_by_slack_id, link_slack_id
 from gastrobrain.config import get_settings
 from gastrobrain.db import conn
 from gastrobrain.oauth import router as oauth_router
@@ -343,16 +344,39 @@ async def _handle_slash_question(
             await update("申し訳ありません、エラーが発生しました。")
 
 
+async def _resolve_slack_level(slack_user_id: str) -> int:
+    """Map a Slack user to their clearance level. Fast path: a cached
+    members.slack_user_id link. Slow path (first time): resolve the user's email
+    via Slack `users.info` and cache the link. Any failure (no member row, or
+    the `users:read.email` scope is missing) falls back to 0 — the user keeps
+    access to unrestricted docs only, never silently to restricted ones."""
+    cached = await asyncio.to_thread(level_by_slack_id, slack_user_id)
+    if cached is not None:
+        return cached
+    try:
+        resp = await _slack().users_info(user=slack_user_id)
+        email = resp.get("user", {}).get("profile", {}).get("email")
+    except Exception:
+        log.warning(
+            "slack users.info failed for %s (check users:read.email scope); "
+            "defaulting to unrestricted-only", slack_user_id, exc_info=True,
+        )
+        return 0
+    return await asyncio.to_thread(link_slack_id, email, slack_user_id)
+
+
 async def _process_question(*, question: str, user_id: str, update) -> None:
     """Slack-side adapter: delegates to the surface-agnostic pipeline orchestrator
-    and renders the final answer as Slack blocks. Behaviour is unchanged from the
-    prior inline implementation; the body now lives in `pipeline.run_pipeline`."""
+    and renders the final answer as Slack blocks. Resolves the asker's clearance
+    level first so restricted docs are filtered out of retrieval."""
+    max_level = await _resolve_slack_level(user_id)
     await run_pipeline_for_slack(
         question=question,
         user_id=user_id,
         update=update,
         insert_query=_insert_query,
         build_answer_blocks=_build_answer_blocks,
+        max_level=max_level,
     )
 
 

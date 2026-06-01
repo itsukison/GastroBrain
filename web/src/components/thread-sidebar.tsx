@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useState, useTransition } from "react";
+import Link from "next/link";
 import { useRouter, usePathname } from "next/navigation";
-import { Plus, Trash2, LogOut, Settings } from "lucide-react";
+import { Plus, Trash2, LogOut, Settings, ShieldCheck } from "lucide-react";
 import type { ThreadSummary } from "@/types";
 import { cn } from "@/lib/cn";
 import { SettingsModal } from "./settings-modal";
@@ -85,6 +86,17 @@ export function ThreadSidebar({ initial, userEmail }: { initial: ThreadSummary[]
   const [pending, startTransition] = useTransition();
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
+
+  useEffect(() => {
+    // Show the org-management entry only to admins. The /org page and every
+    // backend endpoint re-check this, so a non-admin who guesses the URL still
+    // can't do anything — this just hides the link.
+    fetch("/api/org/me")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d: { is_admin?: boolean } | null) => setIsAdmin(Boolean(d?.is_admin)))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     // Light periodic refresh (every 30s while focused) so newly created threads
@@ -203,6 +215,16 @@ export function ThreadSidebar({ initial, userEmail }: { initial: ThreadSummary[]
             <span className="flex-1 truncate" title={userEmail}>
               {userEmail}
             </span>
+            {isAdmin && (
+              <Link
+                href="/org"
+                className="h-6 w-6 grid place-items-center rounded-md hover:bg-sidebar-accent hover:text-foreground transition"
+                title="組織管理"
+                aria-label="組織管理"
+              >
+                <ShieldCheck className="w-3.5 h-3.5" aria-hidden />
+              </Link>
+            )}
             <button
               type="button"
               onClick={() => setSettingsOpen(true)}
