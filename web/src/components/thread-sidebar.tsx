@@ -153,7 +153,7 @@ export function ThreadSidebar({ initial, userEmail }: { initial: ThreadSummary[]
         onConfirm={confirmDelete}
       />
 
-      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} isAdmin={isAdmin} />
 
       <aside className="w-72 h-full bg-sidebar border-r border-sidebar-border flex flex-col">
         <div className="h-12 px-3 flex items-center gap-[0.3rem] shrink-0">

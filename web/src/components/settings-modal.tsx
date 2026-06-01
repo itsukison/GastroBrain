@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
   AlertTriangle,
@@ -9,6 +10,7 @@ import {
   ChevronRight,
   Copy,
   Plug,
+  ShieldCheck,
   Trash2,
   User,
 } from "lucide-react";
@@ -491,10 +493,13 @@ function PatPanel() {
 export function SettingsModal({
   open,
   onClose,
+  isAdmin = false,
 }: {
   open: boolean;
   onClose: () => void;
+  isAdmin?: boolean;
 }) {
+  const router = useRouter();
   const [tab, setTab] = useState<Tab>("profile");
   const [department, setDepartment] = useState<Department | "">("");
   const [extraNote, setExtraNote] = useState("");
@@ -604,6 +609,19 @@ export function SettingsModal({
                   </button>
                 );
               })}
+              {isAdmin && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onClose();
+                    router.push("/org");
+                  }}
+                  className="flex items-center gap-2 h-8 px-2 rounded-md text-[13px] text-left transition text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground"
+                >
+                  <ShieldCheck className="w-3.5 h-3.5 shrink-0" aria-hidden />
+                  <span>組織管理</span>
+                </button>
+              )}
             </nav>
           </aside>
 
