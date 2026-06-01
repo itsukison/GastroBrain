@@ -15,9 +15,9 @@ import {
 } from "lucide-react";
 
 // ── types ─────────────────────────────────────────────────────────────────
-type Role = { id: number; name: string; level: number };
+export type Role = { id: number; name: string; level: number };
 
-type Member = {
+export type Member = {
   email: string;
   role_id: number | null;
   role_name: string | null;
@@ -26,8 +26,8 @@ type Member = {
   last_sign_in_at: string | null;
 };
 
-type FolderRule = { id: string; folder_prefix: string[]; min_level: number; note: string | null };
-type Folder = { folder_path: string[]; n_docs: number; effective_min_level: number };
+export type FolderRule = { id: string; folder_prefix: string[]; min_level: number; note: string | null };
+export type Folder = { folder_path: string[]; n_docs: number; effective_min_level: number };
 
 type Tab = "members" | "folders";
 
@@ -58,9 +58,9 @@ function Dropdown({
       <DropdownMenu.Trigger asChild disabled={disabled}>
         <button
           type="button"
-          className={`h-8 px-2.5 rounded-lg border border-sidebar-border bg-transparent text-[13px] text-foreground flex items-center justify-between gap-2 hover:bg-sidebar-accent focus:outline-none focus:ring-2 focus:ring-sidebar-accent transition disabled:opacity-50 data-[state=open]:bg-sidebar-accent ${className ?? "w-44"}`}
+          className={`h-8 px-2.5 rounded-lg border border-sidebar-border bg-transparent text-[13px] text-foreground flex items-center justify-between gap-2 hover:bg-sidebar-accent focus:outline-none focus:ring-2 focus:ring-sidebar-accent transition disabled:opacity-50 data-[state=open]:bg-sidebar-accent ${className ?? "w-48"}`}
         >
-          <span className={current ? "" : "text-muted-foreground"}>
+          <span className={`flex-1 min-w-0 truncate text-left ${current ? "" : "text-muted-foreground"}`}>
             {current?.label ?? placeholder ?? "—"}
           </span>
           <ChevronDown className="w-3.5 h-3.5 text-muted-foreground shrink-0" aria-hidden />
@@ -93,8 +93,8 @@ function Dropdown({
 }
 
 // ── members tab ─────────────────────────────────────────────────────────────
-function MembersTab({ roles }: { roles: Role[] }) {
-  const [members, setMembers] = useState<Member[] | null>(null);
+function MembersTab({ roles, initial }: { roles: Role[]; initial: Member[] | null }) {
+  const [members, setMembers] = useState<Member[] | null>(initial);
   const [q, setQ] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -109,13 +109,14 @@ function MembersTab({ roles }: { roles: Role[] }) {
       setMembers([]);
     }
   }, []);
+  // Only fetch client-side if the server didn't prefetch (resilience fallback).
   useEffect(() => {
-    void load();
-  }, [load]);
+    if (initial === null) void load();
+  }, [initial, load]);
 
   const roleOptions = useMemo(
     () => [
-      { value: null as number | null, label: "未割り当て（全社のみ）" },
+      { value: null as number | null, label: "未割り当て" },
       ...roles.map((r) => ({ value: r.id, label: `${r.name}（Lv.${r.level}）` })),
     ],
     [roles],
@@ -125,7 +126,6 @@ function MembersTab({ roles }: { roles: Role[] }) {
     setBusy(email);
     setError(null);
     const before = members;
-    // optimistic
     setMembers((prev) =>
       (prev ?? []).map((m) => {
         if (m.email !== email) return m;
@@ -182,10 +182,10 @@ function MembersTab({ roles }: { roles: Role[] }) {
         <table className="w-full text-[13px]">
           <thead>
             <tr className="bg-sidebar-accent/40 text-muted-foreground text-[11px] uppercase tracking-wide">
-              <th className="text-left font-medium px-4 py-2.5">メンバー</th>
-              <th className="text-left font-medium px-4 py-2.5 w-52">役割</th>
-              <th className="text-left font-medium px-4 py-2.5 w-28">管理者</th>
-              <th className="text-left font-medium px-4 py-2.5 w-28">最終ログイン</th>
+              <th className="text-left font-medium px-4 py-2.5 whitespace-nowrap">メンバー</th>
+              <th className="text-left font-medium px-4 py-2.5 w-52 whitespace-nowrap">役割</th>
+              <th className="text-left font-medium px-4 py-2.5 w-24 whitespace-nowrap">管理者</th>
+              <th className="text-left font-medium px-4 py-2.5 w-32 whitespace-nowrap">最終ログイン</th>
             </tr>
           </thead>
           <tbody>
@@ -219,7 +219,7 @@ function MembersTab({ roles }: { roles: Role[] }) {
                     <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-background transition-all ${m.is_admin ? "left-[18px]" : "left-0.5"}`} />
                   </button>
                 </td>
-                <td className="px-4 py-2.5 text-muted-foreground text-[12px]">
+                <td className="px-4 py-2.5 text-muted-foreground text-[12px] whitespace-nowrap">
                   {m.last_sign_in_at ? new Date(m.last_sign_in_at).toLocaleDateString("ja-JP") : "—"}
                 </td>
               </tr>
@@ -234,9 +234,17 @@ function MembersTab({ roles }: { roles: Role[] }) {
 // ── folders tab ───────────────────────────────────────────────────────────
 const keyOf = (p: string[]) => JSON.stringify(p);
 
-function FoldersTab({ roles }: { roles: Role[] }) {
-  const [folders, setFolders] = useState<Folder[] | null>(null);
-  const [rules, setRules] = useState<FolderRule[]>([]);
+function FoldersTab({
+  roles,
+  initialFolders,
+  initialRules,
+}: {
+  roles: Role[];
+  initialFolders: Folder[] | null;
+  initialRules: FolderRule[];
+}) {
+  const [folders, setFolders] = useState<Folder[] | null>(initialFolders);
+  const [rules, setRules] = useState<FolderRule[]>(initialRules);
   const [q, setQ] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -253,8 +261,8 @@ function FoldersTab({ roles }: { roles: Role[] }) {
     }
   }, []);
   useEffect(() => {
-    void load();
-  }, [load]);
+    if (initialFolders === null) void load();
+  }, [initialFolders, load]);
 
   const ruleByKey = useMemo(() => {
     const m = new Map<string, FolderRule>();
@@ -323,9 +331,9 @@ function FoldersTab({ roles }: { roles: Role[] }) {
         <table className="w-full text-[13px]">
           <thead>
             <tr className="bg-sidebar-accent/40 text-muted-foreground text-[11px] uppercase tracking-wide">
-              <th className="text-left font-medium px-4 py-2.5">フォルダ</th>
-              <th className="text-left font-medium px-4 py-2.5 w-24">ドキュメント</th>
-              <th className="text-left font-medium px-4 py-2.5 w-56">必要レベル</th>
+              <th className="text-left font-medium px-4 py-2.5 whitespace-nowrap">フォルダ</th>
+              <th className="text-left font-medium px-4 py-2.5 w-28 whitespace-nowrap">ドキュメント</th>
+              <th className="text-left font-medium px-4 py-2.5 w-56 whitespace-nowrap">必要レベル</th>
             </tr>
           </thead>
           <tbody>
@@ -348,13 +356,13 @@ function FoldersTab({ roles }: { roles: Role[] }) {
                       </span>
                     </span>
                   </td>
-                  <td className="px-4 py-2.5 text-muted-foreground text-[12px]">{f.n_docs}</td>
+                  <td className="px-4 py-2.5 text-muted-foreground text-[12px] whitespace-nowrap">{f.n_docs}</td>
                   <td className="px-4 py-2">
                     <Dropdown
                       value={f.effective_min_level}
                       options={levelOptions}
                       disabled={busy === k}
-                      className="w-52"
+                      className="w-56"
                       onChange={(v) => setLevel(f, v ?? 0)}
                     />
                   </td>
@@ -369,16 +377,30 @@ function FoldersTab({ roles }: { roles: Role[] }) {
 }
 
 // ── shell ───────────────────────────────────────────────────────────────────
-export function OrgView({ adminEmail }: { adminEmail: string }) {
+export function OrgView({
+  adminEmail,
+  initialRoles,
+  initialMembers,
+  initialFolders,
+  initialRules,
+}: {
+  adminEmail: string;
+  initialRoles: Role[];
+  initialMembers: Member[] | null;
+  initialFolders: Folder[] | null;
+  initialRules: FolderRule[];
+}) {
   const [tab, setTab] = useState<Tab>("members");
-  const [roles, setRoles] = useState<Role[]>([]);
+  const [roles, setRoles] = useState<Role[]>(initialRoles);
 
+  // Fallback only if the server prefetch came back empty (e.g. transient error).
   useEffect(() => {
+    if (initialRoles.length > 0) return;
     fetch("/api/org/roles")
       .then((r) => (r.ok ? r.json() : null))
       .then((d: { roles: Role[] } | null) => d && setRoles(d.roles))
       .catch(() => {});
-  }, []);
+  }, [initialRoles]);
 
   return (
     <div className="h-screen overflow-y-auto scrollbar-thin bg-background">
@@ -419,8 +441,14 @@ export function OrgView({ adminEmail }: { adminEmail: string }) {
           })}
         </div>
 
+        {/* Both tabs stay mounted (just hidden) so switching never refetches. */}
         <div className="ml-11">
-          {tab === "members" ? <MembersTab roles={roles} /> : <FoldersTab roles={roles} />}
+          <div className={tab === "members" ? "" : "hidden"}>
+            <MembersTab roles={roles} initial={initialMembers} />
+          </div>
+          <div className={tab === "folders" ? "" : "hidden"}>
+            <FoldersTab roles={roles} initialFolders={initialFolders} initialRules={initialRules} />
+          </div>
         </div>
       </div>
 
