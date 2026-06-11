@@ -8,6 +8,9 @@ Internal Q&A over Gastroduce's NotePM knowledge base.
 - [`docs/SETUP.md`](docs/SETUP.md) — one-time GCP / Supabase / Slack setup
 - [`docs/SLACK_DEPLOY.md`](docs/SLACK_DEPLOY.md) — Cloud Run deploy checklist
 - [`docs/MCP.md`](docs/MCP.md) — connect any agent (Claude Code, Cursor, …) in one command
+- [`docs/ACCESS_CONTROL.md`](docs/ACCESS_CONTROL.md) — how corpus visibility is derived from NotePM permissions
+- [`docs/NOTEPM_INGESTION.md`](docs/NOTEPM_INGESTION.md) — NotePM-source ingestion status & runbook
+- [`docs/WEB_ARCHITECTURE.md`](docs/WEB_ARCHITECTURE.md) — web chat auth + backend forwarding
 - [`docs/archive/memo.md`](docs/archive/memo.md) — original proposal (superseded by PRD §1)
 
 ## Quick start
@@ -40,6 +43,14 @@ The trailing slash matters — Cloud Run otherwise 307-redirects.
 
 See [`docs/MCP.md`](docs/MCP.md) for the claude.ai connector flow, Claude
 Desktop / Cursor config, and the Personal Access Token path for CI scripts.
+
+## Access control
+
+Corpus visibility is **derived from NotePM's own permissions** — there's no
+manual setup. A person sees a NotePM document only if their NotePM account can
+access that notebook (Slack/Drive/manual docs are unrestricted); identity is
+matched by email and synced nightly. Each user can review what they can see at
+`/org` (「アクセスできる資料」). Details: [`docs/ACCESS_CONTROL.md`](docs/ACCESS_CONTROL.md).
 
 ## Stack
 
