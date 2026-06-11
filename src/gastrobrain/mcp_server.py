@@ -21,6 +21,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from gastrobrain.access import PUBLIC_ONLY, AccessScope
 from gastrobrain.auth import verify_service_token
 from gastrobrain.db import conn
 from gastrobrain.retrieve import retrieve
@@ -102,7 +103,7 @@ def search_knowledge(
     top_k = max(1, min(int(top_k), 20))
     min_score = max(0.0, min(float(min_score), 1.0))
 
-    chunks = retrieve(query, max_level=_current_level.get())
+    chunks = retrieve(query, scope=_current_scope.get())
 
     out: list[dict] = []
     for c in chunks:
@@ -182,10 +183,10 @@ def _log_query(*, query: str, returned: list[dict], latency_ms: int) -> None:
 _current_token_label: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "_current_token_label", default=None
 )
-# Clearance level of the authenticated caller, resolved in the auth middleware
-# and read by search_knowledge to gate retrieval. Default 0 = unrestricted-only.
-_current_level: contextvars.ContextVar[int] = contextvars.ContextVar(
-    "_current_level", default=0
+# Access scope of the authenticated caller, resolved in the auth middleware and
+# read by search_knowledge to gate retrieval. Default = public-only (fail-closed).
+_current_scope: contextvars.ContextVar[AccessScope] = contextvars.ContextVar(
+    "_current_scope", default=PUBLIC_ONLY
 )
 
 
@@ -234,12 +235,12 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
                 headers={"WWW-Authenticate": www_auth},
             )
         reset_label = _current_token_label.set(resolved.label)
-        reset_level = _current_level.set(resolved.level)
+        reset_scope = _current_scope.set(resolved.scope)
         try:
             return await call_next(request)
         finally:
             _current_token_label.reset(reset_label)
-            _current_level.reset(reset_level)
+            _current_scope.reset(reset_scope)
 
 
 # --------------------------------------------------------------------------------------

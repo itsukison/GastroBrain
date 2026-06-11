@@ -9,6 +9,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from typing import Iterator
+from urllib.parse import quote
 
 import httpx
 from tenacity import (
@@ -137,6 +138,42 @@ class NotePMClient:
             next_url = (data.get("meta") or {}).get("next_page")
             if not next_url:
                 return notes
+
+    def list_notes_acl(self) -> Iterator[dict]:
+        """Yield each note's raw access fields for the permission sync:
+        {note_code, name, scope, groups:[name], users:[user_code]}. The REST
+        `users` list is explicitly-added individuals only — group members are
+        resolved separately via group_members()."""
+        next_url: str | None = None
+        while True:
+            data = self._get(next_url) if next_url else self._get("/notes", per_page=100)
+            for n in data.get("notes", []):
+                yield {
+                    "note_code": n["note_code"],
+                    "name": n.get("name", ""),
+                    "scope": n.get("scope", ""),
+                    "groups": [g["name"] for g in n.get("groups", [])],
+                    "users": [u["user_code"] for u in n.get("users", [])],
+                }
+            next_url = (data.get("meta") or {}).get("next_page")
+            if not next_url:
+                return
+
+    def list_groups(self) -> list[str]:
+        """All group names. NotePM exposes only names (no group_code)."""
+        names: list[str] = []
+        next_url: str | None = None
+        while True:
+            data = self._get(next_url) if next_url else self._get("/groups", per_page=100)
+            names.extend(g["name"] for g in data.get("groups", []))
+            next_url = (data.get("meta") or {}).get("next_page")
+            if not next_url:
+                return names
+
+    def group_members(self, name: str) -> list[str]:
+        """user_codes belonging to a group. Members are returned un-paginated."""
+        data = self._get(f"/groups/{quote(name, safe='')}")
+        return [u["user_code"] for u in (data.get("group") or {}).get("users", [])]
 
     def list_pages(self, per_page: int = 100) -> Iterator[Page]:
         next_url: str | None = None

@@ -1,6 +1,7 @@
 .env
 .env.*
 !.env.example
+.env.new
 
 # Python
 __pycache__/
@@ -29,6 +30,7 @@ dist/
 .DS_Store
 
 # Secrets / keys (defense in depth — should never be in repo)
+.secrets/
 *.json.key
 *-service-account*.json
 gastrobrain-production-*.json

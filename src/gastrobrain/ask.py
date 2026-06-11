@@ -5,6 +5,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 
+from gastrobrain.access import SEE_ALL
 from gastrobrain.db import conn
 from gastrobrain.generate import answer
 from gastrobrain.retrieve import retrieve
@@ -20,7 +21,7 @@ def main(
     show_chunks: bool = typer.Option(False, "--show-chunks", help="Print retrieved chunks"),
 ) -> None:
     t0 = time.perf_counter()
-    chunks = retrieve(question)
+    chunks = retrieve(question, scope=SEE_ALL)
     t_retrieve = time.perf_counter() - t0
 
     if show_chunks:

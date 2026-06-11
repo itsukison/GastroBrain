@@ -37,8 +37,11 @@ gb-ask = "gastrobrain.ask:app"
 gb-chat = "gastrobrain.chat:app"
 gb-notepm-dryrun = "gastrobrain.notepm_cli:cli"
 gb-notepm-ingest = "gastrobrain.notepm_cli:ingest_cli"
+gb-notepm-acl-sync = "gastrobrain.notepm_acl:sync_cli"
 gb-drive-dryrun = "gastrobrain.gdrive_cli:dryrun_cli"
 gb-drive-ingest = "gastrobrain.gdrive_cli:ingest_cli"
+gb-slack-dryrun = "gastrobrain.slack_ingest:dryrun_cli"
+gb-slack-ingest = "gastrobrain.slack_ingest:ingest_cli"
 
 [build-system]
 requires = ["hatchling"]

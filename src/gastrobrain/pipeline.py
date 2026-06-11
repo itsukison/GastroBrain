@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 from uuid import UUID
 
+from gastrobrain.access import PUBLIC_ONLY, AccessScope
 from gastrobrain.generate import (
     HistoryTurn,
     StreamDelta,
@@ -25,6 +26,7 @@ from gastrobrain.generate import (
 from gastrobrain.retrieve import (
     RetrievalStats,
     RetrievedChunk,
+    expand_slack_parents,
     rerank_candidates,
     retrieve_candidates,
 )
@@ -110,9 +112,9 @@ class PipelineInput:
     history: list[HistoryTurn] = field(default_factory=list)
     surface: Surface = "web"
     prefs: UserPreferences | None = None
-    # Caller's clearance level (gastrobrain.access). Gates which documents are
-    # searchable. Defaults to 0 = unrestricted-only (fail-closed).
-    max_level: int = 0
+    # Caller's access scope (gastrobrain.access). Gates which documents are
+    # searchable. Defaults to PUBLIC_ONLY (fail-closed).
+    scope: AccessScope = PUBLIC_ONLY
 
 
 async def run_pipeline(inp: PipelineInput) -> AsyncIterator[PipelineEvent]:
@@ -140,14 +142,15 @@ async def run_pipeline(inp: PipelineInput) -> AsyncIterator[PipelineEvent]:
     # 2. Retrieval
     yield RetrievalStarted()
     candidates = await asyncio.to_thread(
-        retrieve_candidates, retrieval_query, stats, inp.max_level
+        retrieve_candidates, retrieval_query, stats, inp.scope
     )
     yield RetrievalDone(n_candidates=len(candidates), stats=stats)
 
-    # 3. Rerank
+    # 3. Rerank (+ expand Slack hits to their full day-conversation)
     chunks: list[RetrievedChunk] = []
     if candidates:
         chunks = await asyncio.to_thread(rerank_candidates, retrieval_query, candidates, stats)
+        chunks = await asyncio.to_thread(expand_slack_parents, chunks)
     yield RerankDone(chunks=chunks, stats=stats)
 
     # 4. Streaming generation
@@ -212,15 +215,15 @@ async def run_pipeline_for_slack(
     update,
     insert_query,
     build_answer_blocks,
-    max_level: int = 0,
+    scope: AccessScope = PUBLIC_ONLY,
 ) -> UUID | None:
     """Drives `run_pipeline` and maps events to the Slack update() callback.
 
-    `max_level` is the Slack user's resolved clearance level (slack_app.py does
-    the Slack-id→email→level lookup). Returns the inserted query_id (or None if
+    `scope` is the Slack user's resolved access scope (slack_app.py does the
+    Slack-id→email→scope lookup). Returns the inserted query_id (or None if
     persistence failed)."""
     inp = PipelineInput(
-        question=question, user_id=user_id, history=[], surface="slack", max_level=max_level
+        question=question, user_id=user_id, history=[], surface="slack", scope=scope
     )
 
     chunks: list[RetrievedChunk] = []

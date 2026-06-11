@@ -23,7 +23,7 @@ import httpx
 from fastapi import Header, HTTPException, status
 from jose import JWTError, jwt
 
-from gastrobrain.access import BREAK_GLASS_LEVEL, resolve_level
+from gastrobrain.access import SEE_ALL, AccessScope, resolve_access
 from gastrobrain.config import get_settings
 
 log = logging.getLogger("gastrobrain.auth")
@@ -201,8 +201,8 @@ def _parse_service_tokens(raw: str) -> list[tuple[str, str]]:
 
 @dataclass(frozen=True)
 class ResolvedToken:
-    label: str   # telemetry label recorded in `queries.user_id` as mcp:<label>
-    level: int   # clearance level gating which docs this caller may retrieve
+    label: str          # telemetry label recorded in `queries.user_id` as mcp:<label>
+    scope: AccessScope  # corpus visibility gating which docs this caller may retrieve
 
 
 def verify_service_token(raw_token: str) -> ResolvedToken:
@@ -211,7 +211,7 @@ def verify_service_token(raw_token: str) -> ResolvedToken:
 
     Three sources, checked cheapest-first:
       1. Env var GASTROBRAIN_MCP_TOKENS — `label:secret` pairs from Secret
-         Manager. Admin-minted, break-glass → full access (BREAK_GLASS_LEVEL).
+         Manager. Admin-minted, break-glass → full access (SEE_ALL).
       2. OAuth 2.1 access token (JWT) — issued by /oauth/token. Level resolved
          from the token's email claim.
       3. `public.mcp_tokens` table — self-service PATs minted by logged-in web
@@ -222,7 +222,7 @@ def verify_service_token(raw_token: str) -> ResolvedToken:
     pairs = _parse_service_tokens(get_settings().gastrobrain_mcp_tokens)
     for label, secret in pairs:
         if hmac.compare_digest(raw_bytes, secret.encode()):
-            return ResolvedToken(label=label, level=BREAK_GLASS_LEVEL)
+            return ResolvedToken(label=label, scope=SEE_ALL)
 
     # Lazy import to avoid a circular dep (oauth.py imports require_user from
     # this module).
@@ -231,20 +231,21 @@ def verify_service_token(raw_token: str) -> ResolvedToken:
     ident = verify_access_token_identity(raw_token)
     if ident is not None:
         label, email = ident
-        return ResolvedToken(label=label, level=resolve_level(email))
+        return ResolvedToken(label=label, scope=resolve_access(email))
 
     db = _lookup_db_token(raw_token)
     if db is not None:
-        label, level = db
-        return ResolvedToken(label=label, level=level)
+        label, user_code = db
+        return ResolvedToken(label=label, scope=AccessScope(user_code=user_code))
 
     raise ValueError("token did not match any configured or stored MCP token")
 
 
-def _lookup_db_token(raw_token: str) -> tuple[str, int] | None:
-    """Look up a token by sha256 hash in `mcp_tokens`. Returns (label, level),
-    or None on miss. Level is the owning user's clearance (0 if they have no
-    member/role). On hit, updates `last_used_at`."""
+def _lookup_db_token(raw_token: str) -> tuple[str, str | None] | None:
+    """Look up a token by sha256 hash in `mcp_tokens`. Returns (label,
+    notepm_user_code), or None on miss. user_code is the owning user's NotePM
+    identity (None if their email has no NotePM account → public-only). On hit,
+    updates `last_used_at`."""
     digest = hashlib.sha256(raw_token.encode()).hexdigest()
     from gastrobrain.db import conn
 
@@ -257,18 +258,14 @@ def _lookup_db_token(raw_token: str) -> tuple[str, int] | None:
                 FROM auth.users u
                 WHERE t.token_hash = %s AND t.revoked_at IS NULL AND u.id = t.user_id
                 RETURNING t.label,
-                          COALESCE((
-                              SELECT r.level
-                              FROM members m
-                              LEFT JOIN roles r ON r.id = m.role_id
-                              WHERE m.email = lower(u.email)
-                          ), 0)
+                          (SELECT m.notepm_user_code
+                           FROM members m WHERE m.email = lower(u.email))
                 """,
                 (digest,),
             )
             row = cur.fetchone()
             c.commit()
-            return (row[0], int(row[1])) if row else None
+            return (row[0], row[1]) if row else None
     except Exception:
         log.exception("mcp_tokens lookup failed")
         return None

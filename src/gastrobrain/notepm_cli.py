@@ -231,21 +231,21 @@ def _persist_page(
         doc_id = existing[0]
         cur.execute(
             """UPDATE documents
-               SET title=%s, url=%s, author=%s, folder_path=%s,
+               SET title=%s, url=%s, author=%s, folder_path=%s, note_code=%s,
                    updated_at=%s, raw_markdown=%s, content_hash=%s, deleted_at=NULL
                WHERE id=%s""",
-            (title, page.url, author_name, folder_path,
+            (title, page.url, author_name, folder_path, page.note_code,
              page.updated_at, body, content_hash, doc_id),
         )
         cur.execute("DELETE FROM chunks WHERE doc_id = %s", (doc_id,))
     else:
         cur.execute(
             """INSERT INTO documents
-                  (source, external_id, title, folder_path, url, author,
+                  (source, external_id, title, folder_path, note_code, url, author,
                    updated_at, raw_markdown, content_hash)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                RETURNING id""",
-            (NOTEPM_SOURCE, external_id, title, folder_path, page.url,
+            (NOTEPM_SOURCE, external_id, title, folder_path, page.note_code, page.url,
              author_name, page.updated_at, body, content_hash),
         )
         doc_id = cur.fetchone()[0]
@@ -268,8 +268,14 @@ def ingest(
     limit: int = typer.Option(0, help="Stop after ingesting this many pages (0 = no cap). Use a small number for first-run validation."),
     cutoff: str = typer.Option("", help="Override cutoff date (YYYY-MM-DD); empty = use settings.notepm_cutoff_date"),
     batch_size: int = typer.Option(96, help="Cohere embed batch size (max 96)"),
+    sweep_deletes: bool = typer.Option(True, help="After a complete scan, soft-delete docs that no longer exist (or no longer qualify) in NotePM. Auto-skipped if the scan stopped early (--limit / token budget)."),
 ) -> None:
-    """Backfill NotePM pages matching the manager + cutoff filter into Supabase.
+    """Sync NotePM pages matching the manager + cutoff filter into Supabase.
+
+    Idempotent: unchanged pages (content_hash match) are skipped, so re-runs
+    only embed new/edited pages. With --sweep-deletes (default), a completed
+    scan also soft-deletes docs that disappeared from NotePM — making this a
+    full add/update/delete sync suitable for a nightly job.
 
     This calls Cohere embed_multilingual_v3 and costs money. Two safeties:
       1. --token-budget hard-stops locally before the next page's embeds.
@@ -315,14 +321,36 @@ def ingest(
         rate_limiter = _TokenRateLimiter()
 
         @_DB_RETRY
-        def _hash_exists(content_hash: str, page_code: str) -> bool:
+        def _load_known() -> tuple[dict[str, str], set[str]]:
+            """external_id -> content_hash for all NotePM docs, plus the subset
+            currently live (deleted_at IS NULL). One query instead of one
+            round-trip per scanned page."""
             with conn() as c, c.cursor() as cur:
                 cur.execute(
-                    "SELECT content_hash FROM documents WHERE source = %s AND external_id = %s",
-                    (NOTEPM_SOURCE, page_code),
+                    "SELECT external_id, content_hash, deleted_at IS NULL FROM documents WHERE source = %s",
+                    (NOTEPM_SOURCE,),
                 )
-                row = cur.fetchone()
-                return bool(row and row[0] == content_hash)
+                rows = cur.fetchall()
+            return {r[0]: r[1] for r in rows}, {r[0] for r in rows if r[2]}
+
+        @_DB_RETRY
+        def _sweep(codes: list[str]) -> tuple[int, int]:
+            """Soft-delete live docs not seen this scan; un-delete reappeared ones."""
+            with conn() as c, c.cursor() as cur:
+                cur.execute(
+                    """UPDATE documents SET deleted_at = now()
+                       WHERE source = %s AND deleted_at IS NULL AND NOT (external_id = ANY(%s))""",
+                    (NOTEPM_SOURCE, codes),
+                )
+                deleted = cur.rowcount
+                cur.execute(
+                    """UPDATE documents SET deleted_at = NULL
+                       WHERE source = %s AND deleted_at IS NOT NULL AND external_id = ANY(%s)""",
+                    (NOTEPM_SOURCE, codes),
+                )
+                restored = cur.rowcount
+                c.commit()
+                return deleted, restored
 
         @_DB_RETRY
         def _persist_with_retry(page, body, chs, titled, embeddings, folder_path, author_name):
@@ -331,11 +359,17 @@ def ingest(
                 c.commit()
                 return n
 
+        known_hashes, live_codes = _load_known()
+        console.print(f"  {len(known_hashes)} docs already in DB ({len(live_codes)} live)")
+        seen_codes: set[str] = set()
+        scan_complete = False
+
         for page in client.list_pages():
             scanned += 1
             page_dt = datetime.fromisoformat(page.updated_at).replace(tzinfo=None)
             if page_dt < cutoff_dt:
                 stop_reason = f"reached cutoff at scan #{scanned}"
+                scan_complete = True
                 break
             if page.note_code in excluded_notes:
                 skipped_excluded_note += 1
@@ -349,9 +383,10 @@ def ingest(
             if not body.strip():
                 skipped_empty += 1
                 continue
+            seen_codes.add(page.page_code)
 
             content_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
-            if _hash_exists(content_hash, page.page_code):
+            if known_hashes.get(page.page_code) == content_hash:
                 skipped_unchanged += 1
                 continue
 
@@ -393,6 +428,20 @@ def ingest(
                 stop_reason = f"hit --limit {limit}"
                 break
 
+        if stop_reason == "exhausted":
+            scan_complete = True
+
+        deleted = restored = 0
+        if sweep_deletes and scan_complete:
+            candidates = live_codes - seen_codes
+            max_deletes = max(50, len(live_codes) // 20)
+            if len(candidates) > max_deletes:
+                console.print(f"[red]Sweep aborted: {len(candidates)} docs would be deleted (> {max_deletes} guard). Likely an API or filter regression — investigate before sweeping.[/red]")
+            else:
+                deleted, restored = _sweep(sorted(seen_codes))
+        elif sweep_deletes:
+            console.print("[yellow]Sweep skipped: scan did not complete (budget/limit stop).[/yellow]")
+
         spent = running_tokens * COHERE_USD_PER_1M / 1_000_000
         console.print(f"\n[bold]Done.[/bold] Stop: {stop_reason}")
         console.print(f"  Scanned:               {scanned}")
@@ -401,6 +450,7 @@ def ingest(
         console.print(f"  Skipped (non-manager): {skipped_non_manager}")
         console.print(f"  Skipped (excluded note): {skipped_excluded_note}")
         console.print(f"  Skipped (empty body):  {skipped_empty}")
+        console.print(f"  Soft-deleted:          {deleted}   Restored: {restored}")
         console.print(f"  [bold]Estimated cost:[/bold] {running_tokens:,} tokens (~${spent:.4f})")
 
 

@@ -23,7 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
-from gastrobrain.access import is_admin, recompute_document_levels
+from gastrobrain.access import PUBLIC_ONLY, AccessScope, is_admin, recompute_document_levels
 from gastrobrain.auth import AuthUser, require_user
 from gastrobrain.config import get_settings
 from gastrobrain.db import conn
@@ -431,20 +431,15 @@ async def chat(body: ChatBody, user: AuthUser = Depends(require_user)) -> EventS
             if not cur.fetchone():
                 raise HTTPException(status_code=404, detail="thread not found")
 
-            # Clearance level (gates which docs retrieval may surface). Resolved
-            # by email — the universal identity across web/Slack/MCP. No member
-            # row or no role → 0 (unrestricted-only).
+            # Access scope (gates which docs retrieval may surface). Resolved by
+            # email — the universal identity across web/Slack/MCP. No member row
+            # or no NotePM account → public-only (fail-closed).
             cur.execute(
-                """
-                SELECT COALESCE((
-                    SELECT r.level FROM members m
-                    LEFT JOIN roles r ON r.id = m.role_id
-                    WHERE m.email = lower(%s)
-                ), 0)
-                """,
+                "SELECT notepm_user_code FROM members WHERE email = lower(%s)",
                 (user.email,),
             )
-            max_level = int(cur.fetchone()[0])
+            row = cur.fetchone()
+            scope = AccessScope(user_code=row[0]) if row and row[0] else PUBLIC_ONLY
 
             cur.execute(
                 """
@@ -482,11 +477,11 @@ async def chat(body: ChatBody, user: AuthUser = Depends(require_user)) -> EventS
                 prefs = None
 
             c.commit()
-            return history, user_msg_id, prefs, max_level
+            return history, user_msg_id, prefs, scope
 
     log.info("chat: prep start conversation=%s user=%s", body.conversation_id, user.user_id)
-    history, _, prefs, max_level = await asyncio.to_thread(_prep)
-    log.info("chat: prep done history_len=%d prefs=%s level=%d", len(history), prefs, max_level)
+    history, _, prefs, scope = await asyncio.to_thread(_prep)
+    log.info("chat: prep done history_len=%d prefs=%s scope=%s", len(history), prefs, scope)
 
     async def _events():
         # Emit immediately so the client can distinguish "Cloud Run accepted +
@@ -499,7 +494,7 @@ async def chat(body: ChatBody, user: AuthUser = Depends(require_user)) -> EventS
                 history=history,
                 surface="web",
                 prefs=prefs,
-                max_level=max_level,
+                scope=scope,
             )
             final: AnswerDone | None = None
             token_count = 0
@@ -845,6 +840,54 @@ async def org_me(user: AuthUser = Depends(require_user)) -> OrgMeOut:
             return {"email": user.email, "level": int(level), "is_admin": bool(admin)}
 
     return OrgMeOut(**await asyncio.to_thread(_do))
+
+
+class AccessNoteOut(BaseModel):
+    name: str
+    n_docs: int
+    is_public: bool
+
+
+class MyAccessOut(BaseModel):
+    total_notes: int
+    total_docs: int
+    notes: list[AccessNoteOut]
+
+
+@router.get("/org/me/access", response_model=MyAccessOut)
+async def org_me_access(user: AuthUser = Depends(require_user)) -> MyAccessOut:
+    """Any logged-in user: the NotePM notebooks they can access (derived from
+    their NotePM permissions) with per-notebook document counts. Read-only —
+    NotePM is the source of truth, there is nothing to edit here."""
+    def _do() -> dict:
+        with conn() as c, c.cursor() as cur:
+            cur.execute(
+                """
+                SELECT n.name, n.is_public, count(d.id) AS n_docs
+                FROM notepm_notes n
+                JOIN documents d
+                  ON d.note_code = n.note_code
+                 AND d.source = 'notepm' AND d.deleted_at IS NULL
+                WHERE n.is_public
+                   OR n.note_code IN (
+                        SELECT note_code FROM notepm_note_access
+                        WHERE user_code = (SELECT notepm_user_code
+                                           FROM members WHERE email = lower(%s))
+                      )
+                GROUP BY n.name, n.is_public
+                ORDER BY n.name
+                """,
+                (user.email,),
+            )
+            rows = cur.fetchall()
+        notes = [{"name": r[0], "is_public": bool(r[1]), "n_docs": int(r[2])} for r in rows]
+        return {
+            "total_notes": len(notes),
+            "total_docs": sum(n["n_docs"] for n in notes),
+            "notes": notes,
+        }
+
+    return MyAccessOut(**await asyncio.to_thread(_do))
 
 
 @router.get("/org/roles")

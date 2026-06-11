@@ -6,6 +6,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.rule import Rule
 
+from gastrobrain.access import SEE_ALL
 from gastrobrain.db import conn
 from gastrobrain.generate import answer
 from gastrobrain.retrieve import RetrievedChunk, retrieve
@@ -59,7 +60,7 @@ def main(
 
 def _ask_once(question: str, *, user: str, verbose: bool) -> None:
     t0 = time.perf_counter()
-    chunks = retrieve(question)
+    chunks = retrieve(question, scope=SEE_ALL)
     t_retrieve = time.perf_counter() - t0
 
     _print_chunk_summary(chunks, verbose=verbose)
