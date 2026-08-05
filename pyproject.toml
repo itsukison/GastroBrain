@@ -29,6 +29,7 @@ dependencies = [
     "sse-starlette>=2.1.0",
     "google-api-python-client>=2.100.0",
     "google-auth>=2.30.0",
+    "google-cloud-bigquery>=3.42.1",
 ]
 
 [project.scripts]
@@ -42,6 +43,9 @@ gb-drive-dryrun = "gastrobrain.gdrive_cli:dryrun_cli"
 gb-drive-ingest = "gastrobrain.gdrive_cli:ingest_cli"
 gb-slack-dryrun = "gastrobrain.slack_ingest:dryrun_cli"
 gb-slack-ingest = "gastrobrain.slack_ingest:ingest_cli"
+gb-slack-acl-sync = "gastrobrain.slack_acl:sync_cli"
+gb-chatwork-dryrun = "gastrobrain.chatwork_ingest:dryrun_cli"
+gb-chatwork-ingest = "gastrobrain.chatwork_ingest:ingest_cli"
 
 [build-system]
 requires = ["hatchling"]
@@ -57,3 +61,8 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
 ignore = ["E501"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]

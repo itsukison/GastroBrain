@@ -17,7 +17,7 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 
 RUN pip install --upgrade pip wheel \
-    && pip install --prefix=/install .
+    && pip install --prefix=/install --ignore-installed .
 
 # --- runtime ---
 FROM python:3.12-slim
@@ -29,6 +29,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 COPY --from=builder /install /usr/local
+# Config YAMLs for the NotePM sync job (manager allowlist / excluded notes).
+COPY config ./config
 
 RUN useradd --no-create-home --shell /bin/false app \
     && chown -R app /app
