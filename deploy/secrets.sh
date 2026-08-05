@@ -18,6 +18,7 @@ echo "  - CLAUDE_API_KEY"
 echo "  - COHERE_API"
 echo "  - SLACK_BOT_TOKEN"
 echo "  - SLACK_SIGNING_SECRET"
+echo "  - CHATWORK_API"
 echo "  - LANGFUSE_PUBLIC_KEY  (optional, leave blank to skip)"
 echo "  - LANGFUSE_SECRET_KEY  (optional, leave blank to skip)"
 echo "  - GASTROBRAIN_MCP_TOKENS  (optional, leave blank to disable /mcp)"
@@ -51,6 +52,7 @@ create_or_update CLAUDE_API_KEY        "Anthropic API key (sk-ant-...)"
 create_or_update COHERE_API            "Cohere API key"
 create_or_update SLACK_BOT_TOKEN       "Slack bot token (xoxb-... — use the ROTATED one)"
 create_or_update SLACK_SIGNING_SECRET  "Slack signing secret (just the hex, no 'signing secret:' prefix)"
+create_or_update CHATWORK_API          "Chatwork API token (x-chatworktoken)"
 create_or_update LANGFUSE_PUBLIC_KEY   "Langfuse public key (optional, blank to skip)"
 create_or_update LANGFUSE_SECRET_KEY   "Langfuse secret key (optional, blank to skip)"
 create_or_update GASTROBRAIN_MCP_TOKENS "MCP bearer tokens, 'label:tok_xxx,label2:tok_yyy' (blank to disable /mcp)"
@@ -87,7 +89,7 @@ if [[ -z "$SA" ]]; then
 fi
 echo "  Cloud Run SA: $SA"
 
-for s in DATABASE_URL CLAUDE_API_KEY COHERE_API SLACK_BOT_TOKEN SLACK_SIGNING_SECRET LANGFUSE_PUBLIC_KEY LANGFUSE_SECRET_KEY GASTROBRAIN_MCP_TOKENS GOOGLE_OAUTH_CLIENT_ID GOOGLE_OAUTH_CLIENT_SECRET GASTROBRAIN_OAUTH_JWT_KEY GASTROBRAIN_OAUTH_STATE_KEY; do
+for s in DATABASE_URL CLAUDE_API_KEY COHERE_API SLACK_BOT_TOKEN SLACK_SIGNING_SECRET CHATWORK_API LANGFUSE_PUBLIC_KEY LANGFUSE_SECRET_KEY GASTROBRAIN_MCP_TOKENS GOOGLE_OAUTH_CLIENT_ID GOOGLE_OAUTH_CLIENT_SECRET GASTROBRAIN_OAUTH_JWT_KEY GASTROBRAIN_OAUTH_STATE_KEY; do
   if gcloud secrets describe "$s" >/dev/null 2>&1; then
     gcloud secrets add-iam-policy-binding "$s" \
       --member="serviceAccount:$SA" \
