@@ -435,11 +435,11 @@ async def chat(body: ChatBody, user: AuthUser = Depends(require_user)) -> EventS
             # email — the universal identity across web/Slack/MCP. No member row
             # or no NotePM account → public-only (fail-closed).
             cur.execute(
-                "SELECT notepm_user_code FROM members WHERE email = lower(%s)",
+                "SELECT notepm_user_code, slack_user_id FROM members WHERE email = lower(%s)",
                 (user.email,),
             )
             row = cur.fetchone()
-            scope = AccessScope(user_code=row[0]) if row and row[0] else PUBLIC_ONLY
+            scope = AccessScope(user_code=row[0], slack_user_id=row[1]) if row else PUBLIC_ONLY
 
             cur.execute(
                 """

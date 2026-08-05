@@ -14,6 +14,8 @@ Auth is ADC (see gdrive.py). Run once before either command:
 from __future__ import annotations
 
 import hashlib
+import re
+from datetime import date, datetime
 
 import psycopg
 import typer
@@ -40,6 +42,26 @@ GDRIVE_FOLDER_PATH = ["会議録"]
 
 def _clean_title(name: str) -> str:
     return name[:-4] if name.lower().endswith(".txt") else name
+
+
+_DATE_IN_TITLE = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
+
+
+def _meeting_date(title: str, modified_time: str) -> date | None:
+    """Meeting date from the title's "... - YYYY-MM-DD HH:MM:SS" suffix, falling
+    back to the Drive modifiedTime. None if neither parses."""
+    m = _DATE_IN_TITLE.search(title)
+    if m:
+        try:
+            return date(int(m[1]), int(m[2]), int(m[3]))
+        except ValueError:
+            pass
+    if modified_time:
+        try:
+            return datetime.fromisoformat(modified_time.replace("Z", "+00:00")).date()
+        except ValueError:
+            pass
+    return None
 
 
 def dryrun(
@@ -91,13 +113,16 @@ def ingest(
     ),
     limit: int = typer.Option(0, help="Stop after ingesting this many files (0 = no cap). Use a small number to validate first."),
     batch_size: int = typer.Option(96, help="Cohere embed batch size (max 96)"),
+    sweep_deletes: bool = typer.Option(True, help="After a complete scan, soft-delete docs whose Drive file no longer exists. Auto-skipped if the scan stopped early (--limit / token budget)."),
 ) -> None:
     """Backfill Drive meeting transcripts into Supabase as source='gdrive'.
 
     Calls Cohere embed and costs money. --token-budget hard-stops locally
     before the next file's embeds; the Cohere dashboard limit is the vendor
     fail-safe. Idempotent: a transcript already present (by content hash) is
-    skipped, so re-runs are safe and only ingest new/changed files."""
+    skipped, so re-runs are safe and only ingest new/changed files. With
+    --sweep-deletes (default), a completed scan also soft-deletes docs whose
+    Drive file disappeared — making this a full add/update/delete sync."""
     budget_usd = token_budget * COHERE_USD_PER_1M / 1_000_000
     console.print(f"[bold]Folder:[/bold] {folder}   [bold]Budget:[/bold] {token_budget:,} tokens (~${budget_usd:.2f})")
     if limit:
@@ -117,6 +142,8 @@ def ingest(
     skipped_empty = 0
     scanned = 0
     stop_reason = "exhausted"
+    seen_ids: set[str] = set()
+    scan_complete = False
 
     @_DB_RETRY
     def _hash_exists(content_hash: str) -> bool:
@@ -128,11 +155,42 @@ def ingest(
             return cur.fetchone() is not None
 
     @_DB_RETRY
+    def _load_live_ids() -> set[str]:
+        with conn() as c, c.cursor() as cur:
+            cur.execute(
+                "SELECT external_id FROM documents WHERE source = %s AND deleted_at IS NULL",
+                (GDRIVE_SOURCE,),
+            )
+            return {r[0] for r in cur.fetchall()}
+
+    @_DB_RETRY
+    def _sweep(ids: list[str]) -> tuple[int, int]:
+        """Soft-delete live docs not seen this scan; un-delete reappeared ones."""
+        with conn() as c, c.cursor() as cur:
+            cur.execute(
+                """UPDATE documents SET deleted_at = now()
+                   WHERE source = %s AND deleted_at IS NULL AND NOT (external_id = ANY(%s))""",
+                (GDRIVE_SOURCE, ids),
+            )
+            deleted = cur.rowcount
+            cur.execute(
+                """UPDATE documents SET deleted_at = NULL
+                   WHERE source = %s AND deleted_at IS NOT NULL AND external_id = ANY(%s)""",
+                (GDRIVE_SOURCE, ids),
+            )
+            restored = cur.rowcount
+            c.commit()
+            return deleted, restored
+
+    @_DB_RETRY
     def _persist_with_retry(f, body, chs, titled, embeddings, content_hash):
         with conn() as c, c.cursor() as cur:
             n = _persist(cur, f, body, chs, titled, embeddings, content_hash)
             c.commit()
             return n
+
+    live_ids = _load_live_ids()
+    console.print(f"[bold]{len(live_ids)} gdrive docs already live in DB.[/bold]")
 
     for f in files:
         scanned += 1
@@ -140,6 +198,7 @@ def ingest(
         if not body.strip():
             skipped_empty += 1
             continue
+        seen_ids.add(f.id)
 
         content_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
         if content_hash in seen_hashes:
@@ -187,6 +246,20 @@ def ingest(
             stop_reason = f"hit --limit {limit}"
             break
 
+    if stop_reason == "exhausted":
+        scan_complete = True
+
+    deleted = restored = 0
+    if sweep_deletes and scan_complete:
+        candidates = live_ids - seen_ids
+        max_deletes = max(50, len(live_ids) // 20)
+        if len(candidates) > max_deletes:
+            console.print(f"[red]Sweep aborted: {len(candidates)} docs would be deleted (> {max_deletes} guard). Likely a Drive access or listing regression — investigate before sweeping.[/red]")
+        else:
+            deleted, restored = _sweep(sorted(seen_ids))
+    elif sweep_deletes:
+        console.print("[yellow]Sweep skipped: scan did not complete (budget/limit stop).[/yellow]")
+
     spent = running_tokens * COHERE_USD_PER_1M / 1_000_000
     console.print(f"\n[bold]Done.[/bold] Stop: {stop_reason}")
     console.print(f"  Scanned:                {scanned}")
@@ -194,12 +267,14 @@ def ingest(
     console.print(f"  Skipped (dup in folder): {skipped_dupe}")
     console.print(f"  Skipped (already in DB): {skipped_unchanged}")
     console.print(f"  Skipped (empty):         {skipped_empty}")
+    console.print(f"  Soft-deleted:           {deleted}   Restored: {restored}")
     console.print(f"  [bold]Estimated cost:[/bold] {running_tokens:,} tokens (~${spent:.4f})")
 
 
 def _persist(cur, f: DriveFile, body: str, chunks, titled, embeddings, content_hash: str) -> int:
     external_id = f.id
     title = _clean_title(f.name)
+    meeting_date = _meeting_date(title, f.modified_time)
     cur.execute(
         "SELECT id FROM documents WHERE source = %s AND external_id = %s",
         (GDRIVE_SOURCE, external_id),
@@ -210,21 +285,22 @@ def _persist(cur, f: DriveFile, body: str, chunks, titled, embeddings, content_h
         cur.execute(
             """UPDATE documents
                SET title=%s, url=%s, author=%s, folder_path=%s,
-                   updated_at=%s, raw_markdown=%s, content_hash=%s, deleted_at=NULL
+                   updated_at=%s, raw_markdown=%s, content_hash=%s,
+                   meeting_date=%s, deleted_at=NULL
                WHERE id=%s""",
             (title, f.web_view_link, None, GDRIVE_FOLDER_PATH,
-             f.modified_time, body, content_hash, doc_id),
+             f.modified_time, body, content_hash, meeting_date, doc_id),
         )
         cur.execute("DELETE FROM chunks WHERE doc_id = %s", (doc_id,))
     else:
         cur.execute(
             """INSERT INTO documents
                   (source, external_id, title, folder_path, url, author,
-                   updated_at, raw_markdown, content_hash)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   updated_at, raw_markdown, content_hash, meeting_date)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                RETURNING id""",
             (GDRIVE_SOURCE, external_id, title, GDRIVE_FOLDER_PATH, f.web_view_link,
-             None, f.modified_time, body, content_hash),
+             None, f.modified_time, body, content_hash, meeting_date),
         )
         doc_id = cur.fetchone()[0]
     for ch, t, emb in zip(chunks, titled, embeddings, strict=True):

@@ -32,6 +32,14 @@ class Settings(BaseSettings):
     slack_bot_token: str = ""
     slack_signing_secret: str = Field(default="", alias="SLACK_SIGNING_SECRET")
 
+    # Chatwork — forward-only room ingestion. The API key is one account's token
+    # and the messages endpoint only returns the latest ~100 per room (no history
+    # pagination), so this captures conversations from-now-on, not the archive.
+    # Chatwork exposes no member emails, so docs can't be per-user gated; only the
+    # rooms in this allowlist are ingested and they are visible to everyone.
+    chatwork_api_token: str = Field(default="", alias="CHATWORK_API")
+    chatwork_room_ids: str = ""  # comma-separated room_id allowlist
+
     supabase_jwt_secret: str = ""
     supabase_project_url: str = ""
 
@@ -54,6 +62,16 @@ class Settings(BaseSettings):
     gastrobrain_mcp_tokens: str = ""
     gastrobrain_mcp_enabled: bool = True
 
+    # BigQuery sales data (ec-data-retrive project) — MCP text-to-SQL surface.
+    # Jobs are billed to sales_bq_billing_project; tables live in sales_bq_data_project.
+    sales_bq_enabled: bool = True
+    sales_bq_billing_project: str = "gastrobrain-production"
+    sales_bq_data_project: str = "rational-clock-468109-n7"
+    sales_bq_dataset: str = "sales_data"
+    sales_bq_max_bytes: int = 1_000_000_000  # 1 GB scan cap per query
+    sales_bq_max_rows: int = 200
+    sales_bq_timeout_s: float = 60.0
+
     # OAuth 2.1 authorization server for /mcp/ — see oauth.py.
     # Empty client_id disables the OAuth surface (static tokens still work).
     google_oauth_client_id: str = ""
@@ -73,6 +91,14 @@ class Settings(BaseSettings):
     retrieve_top_k_fused: int = 25
     retrieve_top_k_final: int = 8
     rerank_score_floor: float = 0.20
+    # Recency tie-break (see retrieve.rerank_candidates). A small bounded bonus
+    # added to the rerank score so fresher docs win near-ties without overriding
+    # relevance. Floor is applied on the *base* score, so recency can't rescue
+    # low-relevance chunks. overfetch reranks a few extra so a fresh doc can be
+    # pulled into the final top-k.
+    recency_halflife_days: float = 180.0
+    recency_max_bonus: float = 0.05
+    rerank_overfetch: int = 4
 
     env: str = "dev"
     log_level: str = "INFO"

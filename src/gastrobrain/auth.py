@@ -235,17 +235,19 @@ def verify_service_token(raw_token: str) -> ResolvedToken:
 
     db = _lookup_db_token(raw_token)
     if db is not None:
-        label, user_code = db
-        return ResolvedToken(label=label, scope=AccessScope(user_code=user_code))
+        label, user_code, slack_user_id = db
+        return ResolvedToken(
+            label=label, scope=AccessScope(user_code=user_code, slack_user_id=slack_user_id)
+        )
 
     raise ValueError("token did not match any configured or stored MCP token")
 
 
-def _lookup_db_token(raw_token: str) -> tuple[str, str | None] | None:
+def _lookup_db_token(raw_token: str) -> tuple[str, str | None, str | None] | None:
     """Look up a token by sha256 hash in `mcp_tokens`. Returns (label,
-    notepm_user_code), or None on miss. user_code is the owning user's NotePM
-    identity (None if their email has no NotePM account → public-only). On hit,
-    updates `last_used_at`."""
+    notepm_user_code, slack_user_id), or None on miss. Both identities are the
+    owning user's (None when their email has no NotePM account / Slack link →
+    that source's public subset only). On hit, updates `last_used_at`."""
     digest = hashlib.sha256(raw_token.encode()).hexdigest()
     from gastrobrain.db import conn
 
@@ -259,13 +261,15 @@ def _lookup_db_token(raw_token: str) -> tuple[str, str | None] | None:
                 WHERE t.token_hash = %s AND t.revoked_at IS NULL AND u.id = t.user_id
                 RETURNING t.label,
                           (SELECT m.notepm_user_code
+                           FROM members m WHERE m.email = lower(u.email)),
+                          (SELECT m.slack_user_id
                            FROM members m WHERE m.email = lower(u.email))
                 """,
                 (digest,),
             )
             row = cur.fetchone()
             c.commit()
-            return (row[0], row[1]) if row else None
+            return (row[0], row[1], row[2]) if row else None
     except Exception:
         log.exception("mcp_tokens lookup failed")
         return None

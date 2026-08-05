@@ -26,7 +26,7 @@ from gastrobrain.generate import (
 from gastrobrain.retrieve import (
     RetrievalStats,
     RetrievedChunk,
-    expand_slack_parents,
+    expand_conversation_parents,
     rerank_candidates,
     retrieve_candidates,
 )
@@ -150,7 +150,7 @@ async def run_pipeline(inp: PipelineInput) -> AsyncIterator[PipelineEvent]:
     chunks: list[RetrievedChunk] = []
     if candidates:
         chunks = await asyncio.to_thread(rerank_candidates, retrieval_query, candidates, stats)
-        chunks = await asyncio.to_thread(expand_slack_parents, chunks)
+        chunks = await asyncio.to_thread(expand_conversation_parents, chunks)
     yield RerankDone(chunks=chunks, stats=stats)
 
     # 4. Streaming generation

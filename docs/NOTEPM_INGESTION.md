@@ -23,16 +23,19 @@ The directory-scan path (`gb-ingest corpus/`) is documented separately in
   added to retry whitelist on both `notepm.py` and `embed.py`, `psycopg`
   connection-pool health check.
 
-**Backfill progress (live numbers, queried against Supabase 2026-06-01):**
-- **5,608 NotePM documents** ingested; **75,084 chunks** (all embedded).
-- Date range covered: `2025-06-02` … `2026-05-29` (≈12 months).
-- 46 distinct notebooks represented (post-exclusion).
-- 0 soft-deleted rows.
+**Backfill progress (live numbers, queried against Supabase 2026-06-03):**
+- **9,499 NotePM documents** ingested; **109,096 chunks** (all embedded).
+- Date range covered: `2024-05-26` … `2026-06-03` — **the full 2-year window
+  is complete** (scan reaches the cutoff and stops there).
 
-**Backfill remaining:**
-- `notepm_cutoff_date` in config is **`2024-05-26`** (2-year window).
-- Oldest ingested page is `2025-06-02`, so **~12 months / ~5–6k pages** older
-  than that are still un-ingested. See §8 for the run command.
+**Nightly sync (added 2026-06-03):**
+- `gb-notepm-ingest` is now a full add/update/delete sync: it preloads all
+  `(external_id, content_hash)` pairs in one query (no per-page DB round-trip),
+  skips unchanged pages, and — after a *complete* scan — soft-deletes docs that
+  disappeared from NotePM (`--sweep-deletes`, default on). A guard aborts the
+  sweep if it would delete > max(50, 5%) of live docs.
+- Deployed as Cloud Run Job `gastrobrain-notepm-sync`, triggered nightly at
+  03:00 JST by Cloud Scheduler — see `deploy/notepm_sync_job.sh`.
 
 **Cohere key state (see also memory `feedback_cohere_billing.md`):**
 - Two prior keys turned out to be trial-tier (1,000 calls/month cap) and
@@ -41,8 +44,9 @@ The directory-scan path (`gb-ingest corpus/`) is documented separately in
   `COHERE_API`. Bulk ingestion is no longer gated on Itsuki's personal card.
 
 **Not yet built:**
-- Webhook handler for incremental sync (PRD §4.2).
-- Drift reconciliation cron (PRD §4.2.1).
+- Webhook handler for incremental sync (PRD §4.2). The nightly sweep covers
+  PRD §4.2.1's drift reconciliation at 24h granularity; move to the 30-min
+  cron + webhooks only if freshness requirements tighten.
 - Google Drive transcripts (PRD §10.1).
 
 ## 2. Design decisions taken 2026-05-25

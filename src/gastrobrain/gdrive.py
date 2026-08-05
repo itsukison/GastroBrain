@@ -104,13 +104,17 @@ class DriveClient:
                 pageSize=100,
                 pageToken=page_token,
                 orderBy="modifiedTime desc",
+                # The 会議録 folder lives in a Shared Drive ("会議PJT"); without
+                # these flags the API silently returns no files.
+                includeItemsFromAllDrives=True,
+                supportsAllDrives=True,
             )
             .execute()
         )
 
     @_RETRY
     def download_text(self, file_id: str) -> str:
-        data = self._svc.files().get_media(fileId=file_id).execute()
+        data = self._svc.files().get_media(fileId=file_id, supportsAllDrives=True).execute()
         if isinstance(data, bytes):
             return data.decode("utf-8", errors="replace")
         return str(data)

@@ -30,12 +30,15 @@ class AccessScope:
     """Per-request corpus visibility.
 
     - `see_all` (break-glass / operator tokens, local CLIs): every document.
-    - otherwise: the caller's NotePM identity. `user_code` gates NotePM docs by
-      note membership; non-NotePM docs and public notes are always visible.
-      `user_code is None` (no NotePM account matched) → public notes only.
+    - otherwise: the caller's identity across sources.
+      `user_code` gates NotePM docs by note membership (public notes always
+      visible). `slack_user_id` gates Slack docs by channel membership (public
+      channels always visible). gdrive/manual docs are unrestricted. A `None`
+      on either identity → only the public subset of that source (fail-closed).
     """
 
     user_code: str | None = None
+    slack_user_id: str | None = None
     see_all: bool = False
 
 
@@ -59,9 +62,14 @@ def resolve_access(email: str | None) -> AccessScope:
     if not email:
         return PUBLIC_ONLY
     with conn() as c, c.cursor() as cur:
-        cur.execute("SELECT notepm_user_code FROM members WHERE email = %s", (email,))
+        cur.execute(
+            "SELECT notepm_user_code, slack_user_id FROM members WHERE email = %s",
+            (email,),
+        )
         row = cur.fetchone()
-    return AccessScope(user_code=row[0]) if row and row[0] else PUBLIC_ONLY
+    if not row:
+        return PUBLIC_ONLY
+    return AccessScope(user_code=row[0], slack_user_id=row[1])
 
 
 def is_admin(email: str | None) -> bool:
@@ -89,7 +97,9 @@ def scope_by_slack_id(slack_user_id: str) -> AccessScope | None:
         row = cur.fetchone()
     if row is None:
         return None
-    return AccessScope(user_code=row[0]) if row[0] else PUBLIC_ONLY
+    # Known Slack id → gate Slack docs by this user's channel membership, plus
+    # their NotePM scope (None when no NotePM account is linked).
+    return AccessScope(user_code=row[0], slack_user_id=slack_user_id)
 
 
 def link_slack_id(email: str | None, slack_user_id: str) -> AccessScope:
@@ -116,7 +126,9 @@ def link_slack_id(email: str | None, slack_user_id: str) -> AccessScope:
         )
         row = cur.fetchone()
         c.commit()
-    return AccessScope(user_code=row[0]) if row and row[0] else PUBLIC_ONLY
+    if not row:
+        return PUBLIC_ONLY
+    return AccessScope(user_code=row[0], slack_user_id=slack_user_id)
 
 
 def recompute_document_levels() -> None:
