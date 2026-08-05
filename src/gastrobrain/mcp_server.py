@@ -23,6 +23,7 @@ from starlette.responses import JSONResponse
 
 from gastrobrain.access import PUBLIC_ONLY, AccessScope
 from gastrobrain.auth import verify_service_token
+from gastrobrain.config import get_settings
 from gastrobrain.db import conn
 from gastrobrain.retrieve import retrieve
 
@@ -135,6 +136,79 @@ def search_knowledge(
         log.exception("mcp telemetry insert failed (non-fatal)")
 
     return out
+
+
+# --------------------------------------------------------------------------------------
+# Tools: sales data (BigQuery) — same Plan-A philosophy as search_knowledge:
+# we provide schema context + guarded execution, the caller's LLM writes the SQL.
+# --------------------------------------------------------------------------------------
+
+
+def _register_sales_tools() -> None:
+    from gastrobrain.sales_bq import SalesQueryError, run_sales_sql, sales_schema
+
+    @mcp.tool()
+    def get_sales_schema() -> dict:
+        """Get everything needed to query Gastroduce's EC sales data (BigQuery):
+        table/column documentation, live value catalogs, and example queries.
+
+        ALWAYS call this before your first query_sales call in a conversation.
+        The data covers each client store's daily performance on Rakuten /
+        Amazon / Yahoo!: sales, orders, traffic, CVR, ad performance (cost,
+        ROAS, clicks), market share vs. subgenre top-10, product-page metrics,
+        and traffic sources / search keywords.
+
+        Use `catalogs.store_ids` to map user shorthand to exact store_id
+        values (they are Japanese strings like 福栄組合) and
+        `catalogs.sales_data_date_range` to know what dates exist. Follow
+        `usage_notes` (fully-qualified table names, date filters required,
+        SELECT-only). Adapt the `example_queries` patterns where possible —
+        they are verified.
+        """
+        return sales_schema()
+
+    @mcp.tool()
+    def query_sales(sql: str) -> dict:
+        """Run a read-only BigQuery SQL query against Gastroduce's EC sales
+        dataset and return the rows.
+
+        Call get_sales_schema first — it has the table docs, exact store_id
+        values, and verified example queries. Rules: single SELECT/WITH
+        statement in BigQuery GoogleSQL; fully-qualified table names
+        (`project.dataset.table` as given by get_sales_schema); include a
+        date-range WHERE clause (tables are month-partitioned and a scan-size
+        cap rejects unfiltered queries).
+
+        On error, the message explains what to fix (SQL syntax, scan cap,
+        disallowed table) — correct the SQL and retry. Results are capped at
+        ~200 rows (`truncated: true` means aggregate more before re-querying).
+        Answer the user in their language; cite numbers exactly as returned.
+
+        Args:
+            sql: One BigQuery GoogleSQL SELECT statement.
+
+        Returns:
+            dict with `columns`, `rows` (list of objects), `row_count`,
+            `truncated`, and `bytes_processed`.
+        """
+        t0 = time.perf_counter()
+        try:
+            result = run_sales_sql(sql)
+        except SalesQueryError as exc:
+            log.info("mcp.query_sales rejected: %s", exc)
+            return {"error": str(exc)}
+        latency_ms = int((time.perf_counter() - t0) * 1000)
+        log.info("mcp.query_sales rows=%d bytes=%s latency_ms=%d",
+                 result["row_count"], result["bytes_processed"], latency_ms)
+        try:
+            _log_query(query=f"[sales_sql] {sql}", returned=[], latency_ms=latency_ms)
+        except Exception:
+            log.exception("mcp telemetry insert failed (non-fatal)")
+        return result
+
+
+if get_settings().sales_bq_enabled:
+    _register_sales_tools()
 
 
 # --------------------------------------------------------------------------------------

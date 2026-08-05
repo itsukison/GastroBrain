@@ -5,15 +5,17 @@ Model Context Protocol-aware agent — Claude Code, Claude Desktop, Cursor,
 claude.ai connectors, anything else — can search the internal NotePM corpus
 without copy-pasting bearer tokens.
 
-The MCP server is **search-only**. It returns ranked chunks with citations;
-the calling agent uses its own LLM to produce the final answer. No Sonnet
-spending happens on the Gastrobrain side for MCP traffic.
+The MCP server is **context-only**: it returns ranked chunks with citations
+(and, for sales data, schema context + query results); the calling agent uses
+its own LLM to produce the final answer. No Sonnet spending happens on the
+Gastrobrain side for MCP traffic.
 
 - Endpoint: `https://<cloud-run-url>/mcp/` (trailing slash required)
 - Transport: Streamable HTTP (JSON responses, stateless)
 - Auth: **OAuth 2.1** (recommended) — browser-based Google sign-in
 - Auth fallback: bearer Personal Access Token (for CI / scripts)
-- Tool surface: `search_knowledge(query, top_k=8, min_score=0.20)`
+- Tool surface: `search_knowledge(query, top_k=8, min_score=0.20)`,
+  `get_sales_schema()`, `query_sales(sql)`
 
 > **Trailing slash:** Cloud Run 307-redirects `/mcp` → `/mcp/`, and most
 > MCP clients don't follow the redirect. Always register the canonical URL
@@ -161,7 +163,31 @@ Result fields: `chunk_id`, `doc_id`, `doc_title`, `doc_url`, `heading_path`,
 
 ---
 
-## 4. Operating notes
+## 4. Querying sales data (BigQuery)
+
+The same MCP endpoint also exposes Gastroduce's EC sales data (the
+`ec-data-retrive` BigQuery dataset: daily sales / ads / market share /
+product-page / traffic tables per store × mall). The design mirrors
+search-only: **the calling LLM writes the SQL**, Gastrobrain provides schema
+context and guarded execution.
+
+- `get_sales_schema()` — table & column docs, live `store_id` /
+  `ec_platform` value catalogs (cached 6 h), data date range, and verified
+  example queries. Agents are instructed to call this first.
+- `query_sales(sql)` — executes ONE `SELECT`/`WITH` statement. Guardrails:
+  dry-run validation, statement type must be SELECT, referenced tables must
+  stay inside the sales dataset, 1 GB scan cap (forces date-partition
+  filters), ~200-row result cap, 60 s timeout. Jobs are billed to the
+  Gastrobrain GCP project, read access comes from a `bigquery.dataViewer`
+  grant on the data project (see `ec-data-retrive/tf/gastrobrain-access.tf`).
+
+Errors come back as `{"error": "..."}` with an actionable message so the
+agent can fix its SQL and retry. Settings live in `config.py`
+(`sales_bq_*`); set `SALES_BQ_ENABLED=false` to hide both tools.
+
+---
+
+## 5. Operating notes
 
 - **Telemetry**: every MCP call writes a row to `queries` with
   `user_id = 'mcp:<label>'`. For OAuth tokens, `<label>` is the email
@@ -179,7 +205,7 @@ Result fields: `chunk_id`, `doc_id`, `doc_title`, `doc_url`, `heading_path`,
 
 ---
 
-## 5. Why search-only
+## 6. Why search-only
 
 The MCP design principle is "servers provide context, clients run the
 model." Returning generated answers would re-run Sonnet on Gastrobrain's
@@ -193,7 +219,7 @@ experience, use those.
 
 ---
 
-## 6. Local dev / debugging
+## 7. Local dev / debugging
 
 Spin up the server locally (OAuth disabled — use a static token):
 
