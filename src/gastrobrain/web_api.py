@@ -23,7 +23,13 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
-from gastrobrain.access import PUBLIC_ONLY, AccessScope, is_admin, recompute_document_levels
+from gastrobrain.access import (
+    PUBLIC_ONLY,
+    AccessScope,
+    is_admin,
+    recompute_document_levels,
+    resolve_access,
+)
 from gastrobrain.auth import AuthUser, require_user
 from gastrobrain.config import get_settings
 from gastrobrain.db import conn
@@ -40,7 +46,7 @@ from gastrobrain.pipeline import (
     RetrievalStarted,
     run_pipeline,
 )
-from gastrobrain.retrieve import RetrievedChunk
+from gastrobrain.retrieve import RetrievedChunk, access_sql
 from gastrobrain.slack_format import assign_source_numbers
 
 log = logging.getLogger("gastrobrain.web_api")
@@ -70,6 +76,25 @@ class ChatBody(BaseModel):
 class FeedbackBody(BaseModel):
     rating: int = Field(ge=-1, le=1)
     text: str | None = Field(default=None, max_length=2000)
+
+
+class VoiceAskBody(BaseModel):
+    conversation_id: UUID
+    # Shorter cap than /chat: this arrives from a speech transcript, and a
+    # 4,000-char "question" means the transcriber ran away.
+    question: str = Field(min_length=1, max_length=1000)
+
+
+class VoiceAnswerOut(BaseModel):
+    answer: str
+    citations: list[dict]
+    message_id: UUID
+    query_id: UUID | None
+    latency_ms: int
+
+
+class VoiceVocabOut(BaseModel):
+    terms: list[str]
 
 
 class PreferencesBody(BaseModel):
@@ -414,73 +439,13 @@ async def chat(body: ChatBody, user: AuthUser = Depends(require_user)) -> EventS
     Event types: `query_rewritten`, `retrieval_started`, `retrieval_done`,
     `rerank_done`, `token`, `citations`, `done`, `error`.
     """
-    settings = get_settings()
-    history_window = settings.web_history_window
-
-    # Verify ownership + load history + load prefs before opening the stream.
-    # Failing fast here surfaces 4xx instead of a half-rendered SSE.
-    def _prep() -> tuple[list[HistoryTurn], UUID, UserPreferences | None, int]:
-        with conn() as c, c.cursor() as cur:
-            cur.execute(
-                """
-                SELECT 1 FROM conversations
-                WHERE id = %s AND user_id = %s AND deleted_at IS NULL
-                """,
-                (str(body.conversation_id), str(user.user_id)),
-            )
-            if not cur.fetchone():
-                raise HTTPException(status_code=404, detail="thread not found")
-
-            # Access scope (gates which docs retrieval may surface). Resolved by
-            # email — the universal identity across web/Slack/MCP. No member row
-            # or no NotePM account → public-only (fail-closed).
-            cur.execute(
-                "SELECT notepm_user_code, slack_user_id FROM members WHERE email = lower(%s)",
-                (user.email,),
-            )
-            row = cur.fetchone()
-            scope = AccessScope(user_code=row[0], slack_user_id=row[1]) if row else PUBLIC_ONLY
-
-            cur.execute(
-                """
-                SELECT role, content FROM messages
-                WHERE conversation_id = %s
-                ORDER BY created_at DESC
-                LIMIT %s
-                """,
-                (str(body.conversation_id), history_window),
-            )
-            rows = list(reversed(cur.fetchall()))
-            history: list[HistoryTurn] = [{"role": r[0], "content": r[1]} for r in rows]
-
-            cur.execute(
-                """
-                INSERT INTO messages (conversation_id, role, content)
-                VALUES (%s, 'user', %s)
-                RETURNING id
-                """,
-                (str(body.conversation_id), body.question),
-            )
-            user_msg_id = cur.fetchone()[0]
-
-            cur.execute(
-                "SELECT department, extra_note FROM user_preferences WHERE user_id = %s",
-                (str(user.user_id),),
-            )
-            prefs_row = cur.fetchone()
-            if prefs_row and (prefs_row[0] or prefs_row[1]):
-                prefs = UserPreferences(
-                    department=prefs_row[0],
-                    extra_note=prefs_row[1],
-                )
-            else:
-                prefs = None
-
-            c.commit()
-            return history, user_msg_id, prefs, scope
-
     log.info("chat: prep start conversation=%s user=%s", body.conversation_id, user.user_id)
-    history, _, prefs, scope = await asyncio.to_thread(_prep)
+    history, _, prefs, scope = await asyncio.to_thread(
+        _prep_turn,
+        conversation_id=body.conversation_id,
+        user=user,
+        question=body.question,
+    )
     log.info("chat: prep done history_len=%d prefs=%s scope=%s", len(history), prefs, scope)
 
     async def _events():
@@ -550,6 +515,73 @@ async def chat(body: ChatBody, user: AuthUser = Depends(require_user)) -> EventS
             yield _sse("error", {"message": f"{type(exc).__name__}: {exc}"[:500]})
 
     return EventSourceResponse(_events(), media_type="text/event-stream")
+
+
+# --------------------------------------------------------------------------------------
+# Voice (non-streaming) — the "supervisor" behind the Realtime voice agent.
+#
+# The browser's Realtime session calls this as a function tool. It is the same
+# pipeline the web chat runs, with surface="voice" (spoken formatting, hard
+# length cap) and no SSE: the voice agent can't speak a partial answer, so the
+# whole turn is one request/response. See docs/VOICE_AGENT_PLAN.md.
+# --------------------------------------------------------------------------------------
+
+
+@router.post("/voice/ask", response_model=VoiceAnswerOut)
+async def voice_ask(body: VoiceAskBody, user: AuthUser = Depends(require_user)) -> VoiceAnswerOut:
+    log.info("voice/ask: start conversation=%s user=%s", body.conversation_id, user.user_id)
+    history, _, prefs, scope = await asyncio.to_thread(
+        _prep_turn,
+        conversation_id=body.conversation_id,
+        user=user,
+        question=body.question,
+    )
+
+    inp = PipelineInput(
+        question=body.question,
+        user_id=str(user.user_id),
+        history=history,
+        surface="voice",
+        prefs=prefs,
+        scope=scope,
+    )
+    final: AnswerDone | None = None
+    async for ev in run_pipeline(inp):
+        if isinstance(ev, AnswerDone):
+            final = ev
+    if final is None:
+        raise HTTPException(status_code=502, detail="pipeline ended without answer")
+
+    message_id, query_id = await asyncio.to_thread(
+        _persist_assistant_turn,
+        conversation_id=body.conversation_id,
+        user_id=user.user_id,
+        question=body.question,
+        final=final,
+    )
+    log.info(
+        "voice/ask: done chars=%d citations=%d latency_ms=%d",
+        len(final.answer), len(final.chunks), final.latency_ms,
+    )
+    return VoiceAnswerOut(
+        answer=final.answer,
+        citations=_shape_citations_from_chunks(final.chunks),
+        message_id=message_id,
+        query_id=query_id,
+        latency_ms=final.latency_ms,
+    )
+
+
+@router.get("/voice/vocab", response_model=VoiceVocabOut)
+async def voice_vocab(user: AuthUser = Depends(require_user)) -> VoiceVocabOut:
+    """Domain proper nouns, fed to the Realtime session's transcription model as
+    a decoding hint. Store names like 福栄組合 and notebook titles are exactly what
+    a general-purpose ASR mangles, and a mangled noun becomes a failed retrieval.
+
+    Scoped to what this user may see, so the hint list can't leak the existence
+    of a document they have no access to."""
+    terms = await asyncio.to_thread(_voice_vocab_terms, user.email)
+    return VoiceVocabOut(terms=terms)
 
 
 # --------------------------------------------------------------------------------------
@@ -1153,6 +1185,141 @@ def _shape_citations(snapshot: list[dict]) -> list[dict]:
         seen[key] = entry
         out.append(entry)
     return out
+
+
+_VOCAB_TTL_S = 6 * 3600
+_VOCAB_MAX_TERMS = 120
+# Cached per access-scope, keyed by (user_code, slack_user_id) — two users with
+# the same visibility share an entry. TTL matches the sales catalog's.
+_vocab_cache: dict[tuple, tuple[float, list[str]]] = {}
+
+
+def _voice_vocab_terms(email: str | None) -> list[str]:
+    """Proper nouns worth biasing the speech transcriber toward: EC store names,
+    mall names, and the titles of documents this user can actually see.
+
+    Best-effort throughout — a missing BigQuery catalog or a slow DB must never
+    stop a voice session from starting, so every failure degrades to fewer terms."""
+    scope = resolve_access(email)
+    key = (scope.user_code, scope.slack_user_id, scope.see_all)
+    hit = _vocab_cache.get(key)
+    if hit and hit[0] > time.time() - _VOCAB_TTL_S:
+        return hit[1]
+
+    terms: list[str] = []
+    settings = get_settings()
+    if settings.sales_bq_enabled:
+        try:
+            from gastrobrain.sales_bq import sales_schema
+
+            catalogs = sales_schema().get("catalogs") or {}
+            terms += [str(s) for s in catalogs.get("store_ids", [])]
+            terms += [str(p) for p in catalogs.get("ec_platforms", [])]
+        except Exception:
+            log.warning("voice vocab: sales catalogs unavailable", exc_info=True)
+
+    try:
+        access_clause, params = access_sql(scope)
+        with conn() as c, c.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT d.title
+                FROM documents d
+                WHERE d.deleted_at IS NULL
+                  AND d.source = 'notepm'
+                  {access_clause}
+                ORDER BY d.updated_at DESC NULLS LAST
+                LIMIT %s
+                """,
+                [*params, _VOCAB_MAX_TERMS],
+            )
+            terms += [r[0] for r in cur.fetchall() if r[0]]
+    except Exception:
+        log.warning("voice vocab: document titles unavailable", exc_info=True)
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in terms:
+        t = t.strip()
+        # Long titles are sentences, not nouns — they dilute the decoding hint.
+        if not t or len(t) > 40 or t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+        if len(out) >= _VOCAB_MAX_TERMS:
+            break
+
+    _vocab_cache[key] = (time.time(), out)
+    return out
+
+
+def _prep_turn(
+    *,
+    conversation_id: UUID,
+    user: AuthUser,
+    question: str,
+) -> tuple[list[HistoryTurn], UUID, UserPreferences | None, AccessScope]:
+    """Verify thread ownership, resolve access scope, load the history window
+    and prefs, and insert the user's turn — all in one transaction.
+
+    Shared by the streaming `/chat` and the non-streaming `/voice/ask` so both
+    surfaces are gated by exactly the same ACL and see the same history."""
+    history_window = get_settings().web_history_window
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1 FROM conversations
+            WHERE id = %s AND user_id = %s AND deleted_at IS NULL
+            """,
+            (str(conversation_id), str(user.user_id)),
+        )
+        if not cur.fetchone():
+            raise HTTPException(status_code=404, detail="thread not found")
+
+        # Access scope (gates which docs retrieval may surface). Resolved by
+        # email — the universal identity across web/Slack/MCP. No member row
+        # or no NotePM account → public-only (fail-closed).
+        cur.execute(
+            "SELECT notepm_user_code, slack_user_id FROM members WHERE email = lower(%s)",
+            (user.email,),
+        )
+        row = cur.fetchone()
+        scope = AccessScope(user_code=row[0], slack_user_id=row[1]) if row else PUBLIC_ONLY
+
+        cur.execute(
+            """
+            SELECT role, content FROM messages
+            WHERE conversation_id = %s
+            ORDER BY created_at DESC
+            LIMIT %s
+            """,
+            (str(conversation_id), history_window),
+        )
+        rows = list(reversed(cur.fetchall()))
+        history: list[HistoryTurn] = [{"role": r[0], "content": r[1]} for r in rows]
+
+        cur.execute(
+            """
+            INSERT INTO messages (conversation_id, role, content)
+            VALUES (%s, 'user', %s)
+            RETURNING id
+            """,
+            (str(conversation_id), question),
+        )
+        user_msg_id = cur.fetchone()[0]
+
+        cur.execute(
+            "SELECT department, extra_note FROM user_preferences WHERE user_id = %s",
+            (str(user.user_id),),
+        )
+        prefs_row = cur.fetchone()
+        if prefs_row and (prefs_row[0] or prefs_row[1]):
+            prefs = UserPreferences(department=prefs_row[0], extra_note=prefs_row[1])
+        else:
+            prefs = None
+
+        c.commit()
+        return history, user_msg_id, prefs, scope
 
 
 def _persist_assistant_turn(

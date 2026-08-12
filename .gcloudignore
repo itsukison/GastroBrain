@@ -1,0 +1,12 @@
+#!include:.gitignore
+
+# The image only needs pyproject.toml, README.md, src/ and config/ (see
+# Dockerfile). web/ deploys separately to Vercel, and its node_modules /
+# .next are ~560 MB — excluding it keeps the Cloud Build upload small.
+web/
+
+.git/
+.github/
+docs/
+tests/
+corpus/

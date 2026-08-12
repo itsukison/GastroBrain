@@ -104,6 +104,15 @@ _ACCESS_CLAUSE = (
 )
 
 
+def access_sql(scope: AccessScope) -> tuple[str, list]:
+    """SQL fragment (+ its params) that gates a query over `documents d` by the
+    caller's scope. Empty fragment for break-glass scopes. Any query that joins
+    `documents d` should use this rather than re-deriving the predicate."""
+    if scope.see_all:
+        return "", []
+    return _ACCESS_CLAUSE, [scope.user_code, scope.slack_user_id]
+
+
 def retrieve_candidates(
     question: str, stats: RetrievalStats | None = None, scope: AccessScope = PUBLIC_ONLY
 ) -> list[CandidateChunk]:
@@ -122,8 +131,7 @@ def retrieve_candidates(
 
     # see_all → no access clause; otherwise gate by the caller's identities.
     # Param order matches the two `%s` in _ACCESS_CLAUSE (user_code, slack_user_id).
-    access_clause = "" if scope.see_all else _ACCESS_CLAUSE
-    access_params: list = [] if scope.see_all else [scope.user_code, scope.slack_user_id]
+    access_clause, access_params = access_sql(scope)
 
     def _search(meeting_date: date | None) -> tuple[list, list]:
         # `meeting_date`, when set, restricts both arms to that day's docs.

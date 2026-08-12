@@ -11,7 +11,7 @@ from gastrobrain.config import settings
 from gastrobrain.retrieve import RetrievedChunk
 from gastrobrain.slack_format import assign_source_numbers
 
-Surface = Literal["slack", "web"]
+Surface = Literal["slack", "web", "voice"]
 
 Department = Literal["consulting", "sales", "content", "dev", "backoffice", "other"]
 
@@ -62,6 +62,30 @@ _WEB_FORMAT = """
 - 出典の文書名・URL一覧は **出力しない**。Webクライアント側で `[N]` の番号をホバー可能な引用チップに変換するため、本文中は `[N]` 形式の番号のみを示す。
 - マルチターン対話: 直前のやり取りを踏まえつつ、毎回新しい検索結果のみを根拠として答える。"""
 
+# 音声surfaceは、この出力がそのまま音声エージェントに読み上げられる。マークダウンも
+# `[N]` 番号も読み上げると意味不明になるため、web/slack と違って一切出力させない。
+# 出典は画面側に構造化データとして別途返す（web_api._shape_citations_from_chunks）。
+_VOICE_FORMAT = """
+出力形式（音声読み上げ向け）:
+- この回答は音声でそのまま読み上げられる。マークダウン記法（見出し・箇条書き・太字・表）、URL、`[N]` の引用番号は**一切出力しない**。
+- 3文以内、150字以内。結論を最初に述べる。
+- 記号の羅列や箇条書きの代わりに、話し言葉として自然な接続で述べる。
+- 数値・日付・固有名詞は文書の表記どおり正確に述べる。概算に丸めたり単位を省略したりしない。
+- 情報量が多く3文に収まらない場合は、要点のみ述べ、最後に「詳しくは画面の資料をご覧ください」と添える。
+- 提示された文書に答えがない場合は「その件は資料に見当たりませんでした」とだけ答える（この文言を使う）。
+- マルチターン対話: 直前のやり取りを踏まえつつ、毎回新しい検索結果のみを根拠として答える。"""
+
+_SURFACE_FORMAT: dict[str, str] = {
+    "slack": _SLACK_FORMAT,
+    "web": _WEB_FORMAT,
+    "voice": _VOICE_FORMAT,
+}
+
+# Output budget per surface. Voice is capped hard: the cap is what keeps
+# Sonnet's generation time — the dominant term in the voice latency budget —
+# inside the conversational window (see docs/VOICE_AGENT_PLAN.md §6).
+_MAX_TOKENS: dict[str, int] = {"slack": 1024, "web": 1024, "voice": 400}
+
 
 def _user_prefs_block(prefs: UserPreferences | None) -> str:
     """Render the optional per-user preferences block.
@@ -102,8 +126,20 @@ def _user_prefs_block(prefs: UserPreferences | None) -> str:
 
 
 def system_prompt(surface: Surface, prefs: UserPreferences | None = None) -> str:
-    base = _BASE_RULES + (_SLACK_FORMAT if surface == "slack" else _WEB_FORMAT)
+    base = _BASE_RULES + _SURFACE_FORMAT.get(surface, _WEB_FORMAT)
     return base + _user_prefs_block(prefs)
+
+
+def _no_chunks_message(surface: Surface) -> str:
+    """Refusal used when retrieval returned nothing. The voice wording is
+    deliberately distinct so voice refusals are greppable in `queries`, and
+    short enough to be spoken."""
+    if surface == "voice":
+        return "その件は資料に見当たりませんでした。"
+    return (
+        "関連する情報が見つかりませんでした。"
+        "質問を言い換えるか、対象の文書がNotePMに存在するかご確認ください。"
+    )
 
 
 # Back-compat: existing Slack handler imports SYSTEM_PROMPT directly.
@@ -195,7 +231,7 @@ def answer(
 ) -> GenerationResult:
     if not chunks:
         return GenerationResult(
-            answer="関連する情報が見つかりませんでした。質問を言い換えるか、対象の文書がNotePMに存在するかご確認ください。",
+            answer=_no_chunks_message(surface),
             input_tokens=0,
             output_tokens=0,
             cache_read_input_tokens=0,
@@ -204,7 +240,7 @@ def answer(
 
     resp = _get_client().messages.create(
         model=settings.anthropic_model,
-        max_tokens=1024,
+        max_tokens=_MAX_TOKENS.get(surface, 1024),
         system=[
             {
                 "type": "text",
@@ -237,7 +273,7 @@ def answer_stream(
     then a single StreamDone(answer, usage). When chunks is empty, yields a single
     StreamDone with the refusal message — no model call made."""
     if not chunks:
-        msg = "関連する情報が見つかりませんでした。質問を言い換えるか、対象の文書がNotePMに存在するかご確認ください。"
+        msg = _no_chunks_message(surface)
         yield StreamDelta(text=msg)
         yield StreamDone(
             answer=msg,
@@ -250,7 +286,7 @@ def answer_stream(
 
     with _get_client().messages.stream(
         model=settings.anthropic_model,
-        max_tokens=1024,
+        max_tokens=_MAX_TOKENS.get(surface, 1024),
         system=[
             {
                 "type": "text",
