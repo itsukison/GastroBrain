@@ -38,6 +38,26 @@ export type UserPreferences = {
   updated_at: string | null;
 };
 
+/** Response of POST /api/voice/session — everything the browser needs to open
+ * a Realtime session. `clientSecret` is short-lived and single-use. */
+export type VoiceSessionInit = {
+  clientSecret: string;
+  expiresAt: number | null;
+  model: string;
+  instructions: string;
+  transcriptionHint: string;
+};
+
+/** Response of POST /api/voice/ask — one supervisor turn. `answer` is spoken
+ * verbatim by the voice agent; `citations` are rendered on screen. */
+export type VoiceAnswer = {
+  answer: string;
+  citations: Citation[];
+  message_id: string;
+  query_id: string | null;
+  latency_ms: number;
+};
+
 export type ChatStreamEvent =
   | { event: "query_rewritten"; data: { original: string; rewritten: string } }
   | { event: "retrieval_started"; data: Record<string, never> }

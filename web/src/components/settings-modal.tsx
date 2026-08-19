@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
   AlertTriangle,
@@ -10,10 +9,12 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
+  LogOut,
   Plug,
   Trash2,
   User,
 } from "lucide-react";
+import { AccessPanel } from "./org-view";
 import type { Department, UserPreferences } from "@/types";
 
 const MCP_URL = "https://gastrobrain-rjp7bbdhta-an.a.run.app/mcp/";
@@ -29,11 +30,12 @@ const DEPARTMENT_OPTIONS: { value: Department | ""; label: string }[] = [
   { value: "other", label: "その他" },
 ];
 
-type Tab = "profile" | "mcp";
+export type Tab = "profile" | "mcp" | "access";
 
 const TABS: { id: Tab; label: string; icon: typeof User }[] = [
   { id: "profile", label: "プロフィール", icon: User },
   { id: "mcp", label: "MCP連携", icon: Plug },
+  { id: "access", label: "アクセス資料", icon: BookOpen },
 ];
 
 type Installer = "cc" | "claude_ai" | "desktop";
@@ -493,12 +495,15 @@ function PatPanel() {
 export function SettingsModal({
   open,
   onClose,
+  userEmail,
+  initialTab = "profile",
 }: {
   open: boolean;
   onClose: () => void;
+  userEmail: string;
+  initialTab?: Tab;
 }) {
-  const router = useRouter();
-  const [tab, setTab] = useState<Tab>("profile");
+  const [tab, setTab] = useState<Tab>(initialTab);
   const [department, setDepartment] = useState<Department | "">("");
   const [extraNote, setExtraNote] = useState("");
   const [saving, setSaving] = useState(false);
@@ -521,7 +526,7 @@ export function SettingsModal({
     if (!open) return;
     let cancelled = false;
     setError(null);
-    setTab("profile");
+    setTab(initialTab);
     setDepartment("");
     setExtraNote("");
     fetch("/api/preferences")
@@ -537,7 +542,7 @@ export function SettingsModal({
     return () => {
       cancelled = true;
     };
-  }, [open]);
+  }, [open, initialTab]);
 
   async function save() {
     if (noteOver) {
@@ -607,22 +612,42 @@ export function SettingsModal({
                   </button>
                 );
               })}
-              <button
-                type="button"
-                onClick={() => {
-                  onClose();
-                  router.push("/org");
-                }}
-                className="flex items-center gap-2 h-8 px-2 rounded-md text-[13px] text-left transition text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground"
-              >
-                <BookOpen className="w-3.5 h-3.5 shrink-0" aria-hidden />
-                <span>アクセスできる資料</span>
-              </button>
             </nav>
+
+            <div className="mt-6 pt-4 border-t border-sidebar-border">
+              <div
+                className="px-2 mb-1.5 text-[11px] text-muted-foreground truncate"
+                title={userEmail}
+              >
+                {userEmail}
+              </div>
+              {/* Form POST, not fetch: /auth/signout clears the auth cookies
+                  server-side and 303s to /login. */}
+              <form action="/auth/signout" method="post">
+                <button
+                  type="submit"
+                  className="w-full flex items-center gap-2 h-8 px-2 rounded-md text-[13px] text-left text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground transition"
+                >
+                  <LogOut className="w-3.5 h-3.5 shrink-0" aria-hidden />
+                  <span>ログアウト</span>
+                </button>
+              </form>
+            </div>
           </aside>
 
           <main className="flex-1 p-6 min-h-[420px] max-h-[75vh] overflow-y-auto">
-            {tab === "profile" ? (
+            {tab === "access" && (
+              <section>
+                <h3 className="text-[14px] font-semibold text-foreground leading-snug">
+                  アクセス資料
+                </h3>
+                <p className="mt-1 mb-4 text-[12px] text-muted-foreground leading-relaxed">
+                  Gastrobrain が回答に使える範囲は、あなたの NotePM の権限と一致します。
+                </p>
+                <AccessPanel initial={null} />
+              </section>
+            )}
+            {tab === "profile" && (
               <section>
                 <h3 className="text-[14px] font-semibold text-foreground leading-snug">
                   プロフィール
@@ -682,9 +707,8 @@ export function SettingsModal({
                   </ul>
                 </div>
               </section>
-            ) : (
-              <McpSection />
             )}
+            {tab === "mcp" && <McpSection />}
           </main>
         </div>
 
