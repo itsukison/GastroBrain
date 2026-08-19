@@ -119,6 +119,8 @@ The browser never talks to Cloud Run directly. Every network request goes throug
 | `POST /api/chat` (SSE) | `app/api/chat/route.ts` (`stream: true`, `maxDuration: 120`) | `POST /v1/chat` |
 | `POST /api/messages/[id]/feedback` | `app/api/messages/[id]/feedback/route.ts` | `POST /v1/messages/{id}/feedback` |
 | `GET/PUT /api/preferences` | `app/api/preferences/route.ts` | `GET/PUT /v1/preferences` |
+| `POST /api/voice/ask` | `app/api/voice/ask/route.ts` | `POST /v1/voice/ask` |
+| `POST /api/voice/session` | `app/api/voice/session/route.ts` | (OpenAI `client_secrets`; reads `GET /v1/voice/vocab`) |
 
 Server Components (`app/(chat)/layout.tsx`, `app/page.tsx`, `app/(chat)/c/[id]/page.tsx`) use `backendGet<T>()` (`web/src/lib/server-api.ts`) for SSR — same auth path, but returns parsed JSON instead of piping a Response.
 
@@ -181,6 +183,7 @@ Key invariants (encoded in `_BASE_RULES`):
 |---|---|---|---|
 | `slack` | Suppressed in the LLM output; bot appends a numbered list as Block Kit blocks | `### h3`, `**bold**` (Slack mrkdwn translation) | `PipelineInput.surface="slack"` in `pipeline.run_pipeline_for_slack` |
 | `web` | Suppressed in the LLM output; web client renders `SourceList` from the `rerank_done` citations | `## h2`, `**bold**`, `- list`, tables | `PipelineInput.surface="web"` in `web_api.chat` |
+| `voice` | Suppressed entirely — including the `[N]` markers, which are unspeakable; `/voice` renders the citation list from the response | **None** — plain spoken Japanese, ≤3 sentences / 150 chars, `max_tokens` 400 | `PipelineInput.surface="voice"` in `web_api.voice_ask` |
 
 In both cases the LLM is told **not** to include URLs or doc titles in the body. Only `[N]` markers. The client owns the rendering of `[N]` → hoverable chip / numbered list.
 
@@ -303,4 +306,7 @@ If you are tracking persistence…
 - No "share thread" / export.
 - No mobile-optimized layout (best-effort responsive).
 - No cross-surface bridging — a thread started on Slack does not appear in the web sidebar, and vice versa. Slack queries write only to `queries`, not to `messages`/`conversations`.
-- Voice / image attachments out of scope.
+- Image attachments out of scope. Voice now has its own surface at `/voice` —
+  see [`VOICE_AGENT_PLAN.md`](VOICE_AGENT_PLAN.md). It writes to the same
+  `conversations` / `messages` tables, so a voice session is readable in the
+  sidebar afterwards, but it is a separate page, not a mode of the chat UI.

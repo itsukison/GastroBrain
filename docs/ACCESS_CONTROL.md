@@ -107,9 +107,13 @@ users linked, 9,569 NotePM documents.
 ## 5. Self-service "accessible documents" view
 
 `GET /v1/org/me/access` (any signed-in user) returns the notebooks the caller can
-see with per-notebook doc counts. The web `/org` page renders this read-only as
-**「アクセスできる資料」** (`web/src/components/org-view.tsx`). There is nothing to
-edit — permissions are changed in NotePM and flow in on the next sync.
+see with per-notebook doc counts. Rendered read-only as **「アクセスできる資料」**
+(`web/src/components/org-view.tsx`). There is nothing to edit — permissions are
+changed in NotePM and flow in on the next sync.
+
+Two hosts share one `AccessPanel` body: the settings modal's tab (the in-app
+entry point, reached from the sidebar's book icon) and the standalone `/org`
+page, which is kept for direct links and prefetches the data server-side.
 
 ## 6. Caveats
 

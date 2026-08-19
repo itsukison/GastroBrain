@@ -91,3 +91,24 @@ class TestVoiceAskBody:
             question="楽天の在庫発注ルールは？",
         )
         assert body.question.startswith("楽天")
+
+    def test_utterance_is_optional(self):
+        """A client that predates the field must still be accepted — the
+        thread then records the retrieval query, as it did before."""
+        body = VoiceAskBody(
+            conversation_id="00000000-0000-0000-0000-000000000001",
+            question="楽天の在庫発注ルールは？",
+        )
+        assert body.utterance is None
+
+    def test_utterance_carried_separately(self):
+        """The verbatim utterance is what the thread records; `question` stays
+        the context-expanded string retrieval runs on. They must not collapse
+        into one field, or 「チャットで続ける」 shows a query, not a conversation."""
+        body = VoiceAskBody(
+            conversation_id="00000000-0000-0000-0000-000000000001",
+            question="2026年7月の楽天市場の売上",
+            utterance="先月の楽天の売上どうだった？",
+        )
+        assert body.utterance == "先月の楽天の売上どうだった？"
+        assert body.question != body.utterance

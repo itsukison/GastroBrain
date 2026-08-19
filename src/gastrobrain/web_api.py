@@ -83,6 +83,10 @@ class VoiceAskBody(BaseModel):
     # Shorter cap than /chat: this arrives from a speech transcript, and a
     # 4,000-char "question" means the transcriber ran away.
     question: str = Field(min_length=1, max_length=1000)
+    # What the person actually said, as opposed to the context-expanded query
+    # above. Stored as the `messages` row so the thread is a readable record of
+    # the conversation. Optional: an older client that omits it still works.
+    utterance: str | None = Field(default=None, max_length=1000)
 
 
 class VoiceAnswerOut(BaseModel):
@@ -535,6 +539,7 @@ async def voice_ask(body: VoiceAskBody, user: AuthUser = Depends(require_user)) 
         conversation_id=body.conversation_id,
         user=user,
         question=body.question,
+        stored_question=(body.utterance or "").strip() or None,
     )
 
     inp = PipelineInput(
@@ -1258,12 +1263,18 @@ def _prep_turn(
     conversation_id: UUID,
     user: AuthUser,
     question: str,
+    stored_question: str | None = None,
 ) -> tuple[list[HistoryTurn], UUID, UserPreferences | None, AccessScope]:
     """Verify thread ownership, resolve access scope, load the history window
     and prefs, and insert the user's turn — all in one transaction.
 
     Shared by the streaming `/chat` and the non-streaming `/voice/ask` so both
-    surfaces are gated by exactly the same ACL and see the same history."""
+    surfaces are gated by exactly the same ACL and see the same history.
+
+    `stored_question` overrides what lands in `messages` while `question` still
+    drives retrieval. Voice needs this split: the voice agent sends a
+    context-expanded query, but the thread has to read back as what the person
+    actually said, or 「チャットで続ける」 shows a transcript nobody recognises."""
     history_window = get_settings().web_history_window
     with conn() as c, c.cursor() as cur:
         cur.execute(
@@ -1304,7 +1315,7 @@ def _prep_turn(
             VALUES (%s, 'user', %s)
             RETURNING id
             """,
-            (str(conversation_id), question),
+            (str(conversation_id), stored_question or question),
         )
         user_msg_id = cur.fetchone()[0]
 
