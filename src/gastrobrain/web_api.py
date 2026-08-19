@@ -18,11 +18,11 @@ import time
 from typing import Any
 from uuid import UUID
 
-import anthropic
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
+from gastrobrain import llm
 from gastrobrain.access import (
     PUBLIC_ONLY,
     AccessScope,
@@ -391,7 +391,6 @@ async def generate_title(thread_id: UUID, user: AuthUser = Depends(require_user)
     if not question:
         return ThreadOut(**conv)
 
-    s = get_settings()
     user_msg = (
         f"質問: {question.strip()[:400]}\n"
         f"回答(抜粋): {answer_text.strip()[:400]}\n\n"
@@ -399,15 +398,14 @@ async def generate_title(thread_id: UUID, user: AuthUser = Depends(require_user)
     )
     try:
         resp = await asyncio.to_thread(
-            lambda: anthropic.Anthropic(api_key=s.claude_api_key).messages.create(
-                model=s.anthropic_haiku_model,
-                max_tokens=64,
-                system=[{"type": "text", "text": _TITLE_SYSTEM,
-                         "cache_control": {"type": "ephemeral"}}],
+            lambda: llm.complete(
+                system=_TITLE_SYSTEM,
                 messages=[{"role": "user", "content": user_msg}],
+                max_tokens=64,
+                mini=True,
             )
         )
-        title = "".join(b.text for b in resp.content if b.type == "text").strip()
+        title = resp.text.strip()
         title = title.strip("「」\"' \n")[:60] or conv["title"]
     except Exception:
         log.exception("title generation failed; keeping default")

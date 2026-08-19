@@ -7,6 +7,10 @@ set -euo pipefail
 PROJECT="${GCP_PROJECT:-gastrobrain-production}"
 REGION="${GCP_REGION:-asia-northeast1}"
 SERVICE="${GCP_SERVICE:-gastrobrain}"
+# Chat LLM provider: openai (current) or anthropic (rollback). OPENAI_API_KEY
+# must exist in Secret Manager — it is picked up as an optional secret below.
+# To roll back to Claude: LLM_PROVIDER=anthropic ./deploy/run.sh
+LLM_PROVIDER="${LLM_PROVIDER:-openai}"
 
 gcloud config set project "$PROJECT" >/dev/null
 gcloud config set run/region "$REGION" >/dev/null
@@ -17,7 +21,8 @@ echo ""
 OPTIONAL_SECRETS=()
 for s in LANGFUSE_PUBLIC_KEY LANGFUSE_SECRET_KEY GASTROBRAIN_MCP_TOKENS \
          GOOGLE_OAUTH_CLIENT_ID GOOGLE_OAUTH_CLIENT_SECRET \
-         GASTROBRAIN_OAUTH_JWT_KEY GASTROBRAIN_OAUTH_STATE_KEY; do
+         GASTROBRAIN_OAUTH_JWT_KEY GASTROBRAIN_OAUTH_STATE_KEY \
+         OPENAI_API_KEY; do
   if gcloud secrets describe "$s" >/dev/null 2>&1; then
     OPTIONAL_SECRETS+=("$s=$s:latest")
   fi
@@ -52,7 +57,7 @@ gcloud run deploy "$SERVICE" \
   --max-instances 3 \
   --timeout 60 \
   --concurrency 8 \
-  --set-env-vars "ENV=prod,LANGFUSE_BASE_URL=https://jp.cloud.langfuse.com,ANTHROPIC_MODEL=claude-sonnet-4-6,EMBEDDING_MODEL=embed-multilingual-v3.0,RERANK_MODEL=rerank-multilingual-v3.0,GASTROBRAIN_OAUTH_ISSUER=https://gastrobrain-rjp7bbdhta-an.a.run.app" \
+  --set-env-vars "ENV=prod,LANGFUSE_BASE_URL=https://jp.cloud.langfuse.com,LLM_PROVIDER=$LLM_PROVIDER,ANTHROPIC_MODEL=claude-sonnet-4-6,EMBEDDING_MODEL=embed-multilingual-v3.0,RERANK_MODEL=rerank-multilingual-v3.0,GASTROBRAIN_OAUTH_ISSUER=https://gastrobrain-rjp7bbdhta-an.a.run.app" \
   --set-secrets "$SECRETS_CSV"
 
 URL=$(gcloud run services describe "$SERVICE" --region "$REGION" --format='value(status.url)')

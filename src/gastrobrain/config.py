@@ -22,6 +22,18 @@ class Settings(BaseSettings):
     cohere_api: str = Field(default="", alias="COHERE_API")
     anthropic_model: str = "claude-sonnet-4-6"
     anthropic_haiku_model: str = "claude-haiku-4-5-20251001"
+
+    # Chat LLM provider — "openai" (current) or "anthropic" (kept as rollback).
+    # Switches answer generation, query rewriting and thread-title generation
+    # together (see llm.py). Retrieval (Cohere embed/rerank) and the voice agent
+    # are unaffected.
+    llm_provider: str = "openai"
+    openai_api_key: str = ""
+    openai_model: str = "gpt-5.6-terra"
+    openai_mini_model: str = "gpt-5.6-luna"
+    # GPT-5.x are reasoning models; "none" keeps first-token latency comparable
+    # to Sonnet. Accepts none/low/medium/high/xhigh/max.
+    openai_reasoning_effort: str = "none"
     embedding_model: str = "embed-multilingual-v3.0"
     rerank_model: str = "rerank-multilingual-v3.0"
 

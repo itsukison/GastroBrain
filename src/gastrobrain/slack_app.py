@@ -18,6 +18,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from slack_sdk.web.async_client import AsyncWebClient
 
+from gastrobrain import llm
 from gastrobrain.access import PUBLIC_ONLY, AccessScope, link_slack_id, scope_by_slack_id
 from gastrobrain.config import get_settings
 from gastrobrain.db import conn
@@ -105,7 +106,9 @@ async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSON
 
 def _settings():
     s = get_settings()
-    s.require("slack_bot_token", "slack_signing_secret", "claude_api_key", "cohere_api", "database_url")
+    s.require(
+        "slack_bot_token", "slack_signing_secret", llm.api_key_field(), "cohere_api", "database_url"
+    )
     return s
 
 
@@ -520,7 +523,7 @@ def _insert_query(
     input_tokens: int,
     output_tokens: int,
 ) -> UUID:
-    cost_jpy = (input_tokens * 3 + output_tokens * 15) / 1_000_000 * 150
+    cost_jpy = llm.cost_jpy(input_tokens, output_tokens)
     with conn() as c, c.cursor() as cur:
         cur.execute(
             """

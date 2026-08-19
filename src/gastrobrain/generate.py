@@ -5,9 +5,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Literal
 
-import anthropic
-
-from gastrobrain.config import settings
+from gastrobrain import llm
 from gastrobrain.retrieve import RetrievedChunk
 from gastrobrain.slack_format import assign_source_numbers
 
@@ -185,16 +183,6 @@ class StreamDone:
 StreamEvent = StreamDelta | StreamDone
 
 
-_client: anthropic.Anthropic | None = None
-
-
-def _get_client() -> anthropic.Anthropic:
-    global _client
-    if _client is None:
-        _client = anthropic.Anthropic(api_key=settings.claude_api_key)
-    return _client
-
-
 def _build_messages(
     question: str,
     chunks: list[RetrievedChunk],
@@ -238,27 +226,19 @@ def answer(
             cache_creation_input_tokens=0,
         )
 
-    resp = _get_client().messages.create(
-        model=settings.anthropic_model,
-        max_tokens=_MAX_TOKENS.get(surface, 1024),
-        system=[
-            {
-                "type": "text",
-                "text": system_prompt(surface, prefs),
-                "cache_control": {"type": "ephemeral"},
-            }
-        ],
+    resp = llm.complete(
+        system=system_prompt(surface, prefs),
         messages=_build_messages(question, chunks, history),
+        max_tokens=_MAX_TOKENS.get(surface, 1024),
     )
 
-    answer_text = "".join(b.text for b in resp.content if b.type == "text")
     usage = resp.usage
     return GenerationResult(
-        answer=answer_text,
+        answer=resp.text,
         input_tokens=usage.input_tokens,
         output_tokens=usage.output_tokens,
-        cache_read_input_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
-        cache_creation_input_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
+        cache_read_input_tokens=usage.cache_read_input_tokens,
+        cache_creation_input_tokens=usage.cache_creation_input_tokens,
     )
 
 
@@ -269,7 +249,8 @@ def answer_stream(
     surface: Surface = "web",
     prefs: UserPreferences | None = None,
 ) -> Iterator[StreamEvent]:
-    """Streamed Sonnet generation. Yields StreamDelta(text) for each token chunk,
+    """Streamed generation (provider per LLM_PROVIDER). Yields StreamDelta(text)
+    for each token chunk,
     then a single StreamDone(answer, usage). When chunks is empty, yields a single
     StreamDone with the refusal message — no model call made."""
     if not chunks:
@@ -284,32 +265,22 @@ def answer_stream(
         )
         return
 
-    with _get_client().messages.stream(
-        model=settings.anthropic_model,
-        max_tokens=_MAX_TOKENS.get(surface, 1024),
-        system=[
-            {
-                "type": "text",
-                "text": system_prompt(surface, prefs),
-                "cache_control": {"type": "ephemeral"},
-            }
-        ],
+    for event in llm.stream(
+        system=system_prompt(surface, prefs),
         messages=_build_messages(question, chunks, history),
-    ) as stream:
-        buf: list[str] = []
-        for delta in stream.text_stream:
-            if delta:
-                buf.append(delta)
-                yield StreamDelta(text=delta)
-        final = stream.get_final_message()
-        usage = final.usage
-        yield StreamDone(
-            answer="".join(buf),
-            input_tokens=usage.input_tokens,
-            output_tokens=usage.output_tokens,
-            cache_read_input_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
-            cache_creation_input_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
-        )
+        max_tokens=_MAX_TOKENS.get(surface, 1024),
+    ):
+        if isinstance(event, llm.Delta):
+            yield StreamDelta(text=event.text)
+        else:
+            usage = event.usage
+            yield StreamDone(
+                answer=event.text,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                cache_read_input_tokens=usage.cache_read_input_tokens,
+                cache_creation_input_tokens=usage.cache_creation_input_tokens,
+            )
 
 
 def _format_context(chunks: list[RetrievedChunk]) -> str:

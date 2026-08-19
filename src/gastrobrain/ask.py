@@ -5,6 +5,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 
+from gastrobrain import llm
 from gastrobrain.access import SEE_ALL
 from gastrobrain.db import conn
 from gastrobrain.generate import answer
@@ -69,10 +70,7 @@ def _log_query(
     input_tokens: int,
     output_tokens: int,
 ) -> None:
-    cost_jpy = (
-        input_tokens * 3 / 1_000_000 * 150
-        + output_tokens * 15 / 1_000_000 * 150
-    )
+    cost_jpy = llm.cost_jpy(input_tokens, output_tokens)
     with conn() as c, c.cursor() as cur:
         cur.execute(
             """

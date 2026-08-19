@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import logging
 
-import anthropic
-
-from gastrobrain.config import settings
+from gastrobrain import llm
 from gastrobrain.generate import HistoryTurn, strip_citations
 
 log = logging.getLogger("gastrobrain.rewrite")
@@ -19,10 +17,6 @@ _SYSTEM = """あなたは会話履歴を踏まえて、フォローアップ質�
 5. 必ず元の言語（日本語の質問は日本語のまま）で出力する。"""
 
 _MAX_HISTORY_TURNS_FOR_REWRITE = 6
-
-
-def _client() -> anthropic.Anthropic:
-    return anthropic.Anthropic(api_key=settings.claude_api_key)
 
 
 def standalone_query(question: str, history: list[HistoryTurn] | None) -> str:
@@ -61,13 +55,13 @@ def standalone_query(question: str, history: list[HistoryTurn] | None) -> str:
     )
 
     try:
-        resp = _client().messages.create(
-            model=settings.anthropic_haiku_model,
-            max_tokens=256,
-            system=[{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}],
+        resp = llm.complete(
+            system=_SYSTEM,
             messages=[{"role": "user", "content": user_msg}],
+            max_tokens=256,
+            mini=True,
         )
-        rewritten = "".join(b.text for b in resp.content if b.type == "text").strip()
+        rewritten = resp.text.strip()
         rewritten = rewritten.strip("「」\"' \n")
         if not rewritten:
             return question

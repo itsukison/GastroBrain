@@ -11,6 +11,8 @@ Internal Q&A over Gastroduce's NotePM knowledge base.
 - [`docs/ACCESS_CONTROL.md`](docs/ACCESS_CONTROL.md) — how corpus visibility is derived from NotePM permissions
 - [`docs/NOTEPM_INGESTION.md`](docs/NOTEPM_INGESTION.md) — NotePM-source ingestion status & runbook
 - [`docs/WEB_ARCHITECTURE.md`](docs/WEB_ARCHITECTURE.md) — web chat auth + backend forwarding
+- [`docs/VOICE_AGENT_PLAN.md`](docs/VOICE_AGENT_PLAN.md) — the `/voice` surface: design, prompt, deploy checklist
+- [`docs/VOICE_AGENT.md`](docs/VOICE_AGENT.md) — build-vs-buy research behind that choice
 - [`docs/archive/memo.md`](docs/archive/memo.md) — original proposal (superseded by PRD §1)
 
 ## Quick start
@@ -49,13 +51,16 @@ Desktop / Cursor config, and the Personal Access Token path for CI scripts.
 Corpus visibility is **derived from NotePM's own permissions** — there's no
 manual setup. A person sees a NotePM document only if their NotePM account can
 access that notebook (Slack/Drive/manual docs are unrestricted); identity is
-matched by email and synced nightly. Each user can review what they can see at
-`/org` (「アクセスできる資料」). Details: [`docs/ACCESS_CONTROL.md`](docs/ACCESS_CONTROL.md).
+matched by email and synced nightly. Each user can review what they can see in
+設定 →「アクセスできる資料」. Details: [`docs/ACCESS_CONTROL.md`](docs/ACCESS_CONTROL.md).
 
 ## Stack
 
 - Postgres (Supabase, Tokyo) with `pgvector` (HNSW) + `pgroonga` (JP FTS via MeCab)
 - Embeddings: Cohere `embed-multilingual-v3.0` (1024-dim)
 - Reranker: Cohere `rerank-multilingual-v3.0`
-- LLM: Anthropic `claude-sonnet-4-6` with prompt caching
+- LLM: OpenAI `gpt-5.6-terra` (`reasoning_effort=none`). Anthropic
+  `claude-sonnet-4-6` with prompt caching is kept as a rollback path — set
+  `LLM_PROVIDER=anthropic|openai`. One switch covers answer generation, follow-up
+  query rewriting and thread titles; see `src/gastrobrain/llm.py`
 - Tracing: Langfuse (jp.cloud.langfuse.com)
