@@ -29,6 +29,7 @@ import {
   attachWakeWordGate,
   isMeetingMode,
   openMeetingAudio,
+  usesDefaultAudio,
   MEETING_INSTRUCTIONS,
   type GateState,
 } from "@/lib/meeting-mode";
@@ -219,7 +220,10 @@ export function VoiceSession() {
   // Meeting mode: bound to Meetron's loopback devices, silent until addressed
   // by name. Opt-in via `?mode=meeting` so the page is unchanged for everyone
   // else. See lib/meeting-mode.ts.
-  const meeting = isMeetingMode(useSearchParams());
+  const params = useSearchParams();
+  const meeting = isMeetingMode(params);
+  // Testing aid: meeting behaviour on the laptop microphone. See lib/meeting-mode.ts.
+  const defaultAudio = meeting && usesDefaultAudio(params);
   const [gate, setGate] = useState<GateState>("listening");
 
   const [status, setStatus] = useState<Status>("idle");
@@ -413,7 +417,7 @@ export function VoiceSession() {
       // In meeting mode the audio is Meetron's loopback pair, not the OS
       // default. Resolved before connecting so a missing device fails as a
       // clear error rather than a session that silently hears the wrong room.
-      const audio = meeting ? await openMeetingAudio() : null;
+      const audio = meeting && !defaultAudio ? await openMeetingAudio() : null;
 
       const session = new RealtimeSession(agent, {
         model: init.model,
@@ -476,7 +480,7 @@ export function VoiceSession() {
       setError(friendlyError(detail));
       setStatus("error");
     }
-  }, [meeting]);
+  }, [meeting, defaultAudio]);
 
   // Nobody is looking at this tab in a meeting — Meetron opens it in the
   // dedicated Chrome and there is no one to press 「会話を始める」.
@@ -520,6 +524,12 @@ export function VoiceSession() {
         </Link>
         <h1 className="text-[13px] font-medium tracking-tight">
           {meeting ? "商談AI（会議モード）" : "音声で質問"}
+          {/* Unmissable: this session is on the laptop mic, not the meeting. */}
+          {defaultAudio && (
+            <span className="ml-2 text-[11px] font-normal text-destructive">
+              テスト用・PCのマイク
+            </span>
+          )}
         </h1>
 
         <div className="ml-auto flex items-center gap-3">
@@ -578,7 +588,13 @@ export function VoiceSession() {
                 )}
   
                 {error && (
-                  <div className="rounded-2xl bg-destructive/10 px-4 py-3 text-[13px] leading-relaxed text-destructive break-words">
+                  // Tagged so Meetron can read the cause: it drives this tab
+                  // headlessly, and matching on the destructive *style* picks
+                  // up the 終了する button instead of the message.
+                  <div
+                    data-meeting-error
+                    className="rounded-2xl bg-destructive/10 px-4 py-3 text-[13px] leading-relaxed text-destructive break-words"
+                  >
                     {error}
                   </div>
                 )}

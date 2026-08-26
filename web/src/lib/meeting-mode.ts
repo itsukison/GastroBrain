@@ -36,6 +36,22 @@ export function isMeetingMode(params: URLSearchParams | null): boolean {
   return params?.get("mode") === "meeting";
 }
 
+/**
+ * `?mode=meeting&audio=default` — meeting behaviour, laptop microphone.
+ *
+ * For testing the wake-word gate without a meeting. Normal meeting mode listens
+ * to a loopback device fed only by the Meet tab, so talking at the screen does
+ * nothing: the agent is not ignoring you, it genuinely hears silence. This binds
+ * the same gated session to the OS default input so the wake word can be tuned
+ * against a real voice, alone, in seconds.
+ *
+ * Testing aid only — the real participant must never use it, or the agent
+ * listens to the host machine's microphone instead of the meeting.
+ */
+export function usesDefaultAudio(params: URLSearchParams | null): boolean {
+  return params?.get("audio") === "default";
+}
+
 export interface MeetingAudio {
   mediaStream: MediaStream;
   audioElement: HTMLAudioElement;
@@ -95,6 +111,12 @@ export async function openMeetingAudio(): Promise<MeetingAudio> {
     throw new Error("このブラウザは出力デバイスの指定に対応していません。");
   }
   await audioElement.setSinkId(output.deviceId);
+
+  // Publish what was actually bound. Picking the wrong input is the one failure
+  // with no symptom — no error, no audio, an agent that simply never hears its
+  // name — so it has to be readable from outside the page.
+  document.documentElement.dataset.meetingInput = input.label;
+  document.documentElement.dataset.meetingOutput = output.label;
 
   return { mediaStream, audioElement };
 }
