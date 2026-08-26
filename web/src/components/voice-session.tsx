@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import {
   ArrowDown,
   ArrowLeft,
@@ -16,6 +17,7 @@ import {
   X,
 } from "lucide-react";
 import {
+  OpenAIRealtimeWebRTC,
   RealtimeAgent,
   RealtimeSession,
   tool,
@@ -23,6 +25,13 @@ import {
 } from "@openai/agents-realtime";
 import type { Citation, VoiceAnswer, VoiceSessionInit } from "@/types";
 import { cn } from "@/lib/cn";
+import {
+  attachWakeWordGate,
+  isMeetingMode,
+  openMeetingAudio,
+  MEETING_INSTRUCTIONS,
+  type GateState,
+} from "@/lib/meeting-mode";
 
 type Status = "idle" | "connecting" | "live" | "ended" | "error";
 
@@ -207,6 +216,12 @@ function SourceList({
 }
 
 export function VoiceSession() {
+  // Meeting mode: bound to Meetron's loopback devices, silent until addressed
+  // by name. Opt-in via `?mode=meeting` so the page is unchanged for everyone
+  // else. See lib/meeting-mode.ts.
+  const meeting = isMeetingMode(useSearchParams());
+  const [gate, setGate] = useState<GateState>("listening");
+
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState<string | null>(null);
   const [lines, setLines] = useState<Line[]>([]);
@@ -391,12 +406,20 @@ export function VoiceSession() {
 
       const agent = new RealtimeAgent({
         name: "Gastrobrain",
-        instructions: init.instructions,
+        instructions: meeting ? init.instructions + MEETING_INSTRUCTIONS : init.instructions,
         tools: [askGastrobrain],
       });
 
+      // In meeting mode the audio is Meetron's loopback pair, not the OS
+      // default. Resolved before connecting so a missing device fails as a
+      // clear error rather than a session that silently hears the wrong room.
+      const audio = meeting ? await openMeetingAudio() : null;
+
       const session = new RealtimeSession(agent, {
         model: init.model,
+        ...(audio
+          ? { transport: new OpenAIRealtimeWebRTC({ mediaStream: audio.mediaStream, audioElement: audio.audioElement }) }
+          : {}),
         config: {
           audio: {
             input: {
@@ -411,8 +434,12 @@ export function VoiceSession() {
               turnDetection: {
                 type: "semantic_vad",
                 eagerness: "auto",
-                interruptResponse: true,
-                createResponse: true,
+                // In a meeting both must be off. `createResponse` is the wake
+                // word gate — on, it answers every utterance in the room.
+                // `interruptResponse` is separate: on, any cough or side remark
+                // cuts the agent off mid-answer, so it never finishes a sentence.
+                interruptResponse: !meeting,
+                createResponse: !meeting,
               },
               noiseReduction: { type: "near_field" },
             },
@@ -420,6 +447,8 @@ export function VoiceSession() {
           },
         },
       });
+
+      if (meeting) attachWakeWordGate(session, setGate);
 
       session.on("history_updated", (history) => setLines(toLines(history)));
       session.on("agent_tool_start", () => setSearching(true));
@@ -447,7 +476,26 @@ export function VoiceSession() {
       setError(friendlyError(detail));
       setStatus("error");
     }
-  }, []);
+  }, [meeting]);
+
+  // Nobody is looking at this tab in a meeting — Meetron opens it in the
+  // dedicated Chrome and there is no one to press 「会話を始める」.
+  useEffect(() => {
+    if (!meeting || status !== "idle") return;
+    void start();
+  }, [meeting, status, start]);
+
+  // Machine-readable state for Meetron, which drives this tab over CDP and has
+  // to know whether the agent came up. An attribute rather than on-screen text:
+  // the wording here is Japanese and free to change, this contract is not.
+  useEffect(() => {
+    if (!meeting) return;
+    const root = document.documentElement;
+    root.dataset.meetingStatus = status === "live" ? gate : status;
+    return () => {
+      delete root.dataset.meetingStatus;
+    };
+  }, [meeting, status, gate]);
 
   const toggleMute = useCallback(() => {
     const session = sessionRef.current;
@@ -470,9 +518,19 @@ export function VoiceSession() {
         >
           <ArrowLeft className="w-4 h-4" aria-hidden />
         </Link>
-        <h1 className="text-[13px] font-medium tracking-tight">音声で質問</h1>
+        <h1 className="text-[13px] font-medium tracking-tight">
+          {meeting ? "商談AI（会議モード）" : "音声で質問"}
+        </h1>
 
         <div className="ml-auto flex items-center gap-3">
+          {/* The only readout of the wake-word gate. Nobody watches this tab
+              live, but it is what you check over CDP when the agent is silent. */}
+          {meeting && live && (
+            <span className="text-xs text-muted-foreground">
+              {gate === "answering" ? "応答中" : "待機中（呼ばれるまで発言しません）"}
+            </span>
+          )}
+
           {live && (
             <span
               className={cn(
