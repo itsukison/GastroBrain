@@ -70,6 +70,12 @@ class Settings(BaseSettings):
     web_history_window: int = 10
     web_allowed_origins: str = ""
 
+    # The 商談AI participant (../meetron) runs on a VPS and has no Supabase user,
+    # so it authenticates to /v1/meetings/* writes with this shared secret in the
+    # X-Meeting-Agent-Token header. Empty = the agent-facing write paths are
+    # closed (reads by the browser are unaffected). See docs/MEETINGS_WEB.md §6.1.
+    meeting_agent_token: str = ""
+
     # MCP — comma-separated "label:token" pairs. Empty disables the /mcp route.
     gastrobrain_mcp_tokens: str = ""
     gastrobrain_mcp_enabled: bool = True

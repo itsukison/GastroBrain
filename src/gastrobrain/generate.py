@@ -187,12 +187,23 @@ def _build_messages(
     question: str,
     chunks: list[RetrievedChunk],
     history: list[HistoryTurn] | None,
+    extra_context: str | None = None,
 ) -> list[dict]:
     context = _format_context(chunks) if chunks else "(検索結果なし)"
     user_message = (
         "以下は社内文書からの検索結果です。これを参照して質問に答えてください。\n\n"
         f"{context}\n\n---\n\n質問: {question}"
     )
+    if extra_context:
+        # Evidence the caller supplied directly rather than through retrieval —
+        # today only a meeting transcript (docs/MEETINGS_WEB.md §7). It carries no
+        # [N] marker because it is not a citable corpus document; the prompt says
+        # so explicitly, or the model invents a source number for it.
+        user_message = (
+            f"{extra_context}\n\n---\n\n{user_message}\n\n"
+            "※上記の会議の記録には引用番号がありません。会議の内容を根拠にする場合は"
+            "[N]を付けず、「会議中の発言」であることが分かるように書いてください。"
+        )
 
     messages: list[dict] = []
     if history:
@@ -248,12 +259,18 @@ def answer_stream(
     history: list[HistoryTurn] | None = None,
     surface: Surface = "web",
     prefs: UserPreferences | None = None,
+    extra_context: str | None = None,
 ) -> Iterator[StreamEvent]:
     """Streamed generation (provider per LLM_PROVIDER). Yields StreamDelta(text)
     for each token chunk,
     then a single StreamDone(answer, usage). When chunks is empty, yields a single
-    StreamDone with the refusal message — no model call made."""
-    if not chunks:
+    StreamDone with the refusal message — no model call made.
+
+    `extra_context` is non-retrieved evidence supplied by the caller (a meeting
+    transcript). It counts as evidence for the refusal check: a question about a
+    meeting is answerable from the transcript even when retrieval returns nothing,
+    which is the common case."""
+    if not chunks and not extra_context:
         msg = _no_chunks_message(surface)
         yield StreamDelta(text=msg)
         yield StreamDone(
@@ -267,7 +284,7 @@ def answer_stream(
 
     for event in llm.stream(
         system=system_prompt(surface, prefs),
-        messages=_build_messages(question, chunks, history),
+        messages=_build_messages(question, chunks, history, extra_context),
         max_tokens=_MAX_TOKENS.get(surface, 1024),
     ):
         if isinstance(event, llm.Delta):

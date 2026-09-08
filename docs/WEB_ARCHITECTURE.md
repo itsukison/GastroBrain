@@ -120,9 +120,18 @@ The browser never talks to Cloud Run directly. Every network request goes throug
 | `POST /api/messages/[id]/feedback` | `app/api/messages/[id]/feedback/route.ts` | `POST /v1/messages/{id}/feedback` |
 | `GET/PUT /api/preferences` | `app/api/preferences/route.ts` | `GET/PUT /v1/preferences` |
 | `POST /api/voice/ask` | `app/api/voice/ask/route.ts` | `POST /v1/voice/ask` |
+| `GET /api/meetings` | `app/api/meetings/route.ts` | `GET /v1/meetings` |
+| `GET/PATCH/DELETE /api/meetings/[id]` | `app/api/meetings/[id]/route.ts` | `GET/PATCH/DELETE /v1/meetings/{id}` |
+| `POST /api/meetings/[id]/state` | `app/api/meetings/[id]/state/route.ts` | `POST /v1/meetings/{id}/state` |
+| `POST /api/meetings/[id]/share` | `app/api/meetings/[id]/share/route.ts` | `POST /v1/meetings/{id}/share` |
+| `POST /api/meetings/[id]/summary` | `app/api/meetings/[id]/summary/route.ts` | `POST /v1/meetings/{id}/summary` |
 | `POST /api/voice/session` | `app/api/voice/session/route.ts` | (OpenAI `client_secrets`; reads `GET /v1/voice/vocab`) |
 
-Server Components (`app/(chat)/layout.tsx`, `app/page.tsx`, `app/(chat)/c/[id]/page.tsx`) use `backendGet<T>()` (`web/src/lib/server-api.ts`) for SSR — same auth path, but returns parsed JSON instead of piping a Response.
+The `/v1/meetings/*` **write** paths are the exception to the table above: they
+are called by the meeting participant on its VPS with a service token, not by the
+browser, so they have no `/api/*` proxy. See [`MEETINGS_WEB.md`](MEETINGS_WEB.md) §6.
+
+Server Components (`app/(chat)/layout.tsx`, `app/page.tsx`, `app/(chat)/c/[id]/page.tsx`, `app/meetings/*`) use `backendGet<T>()` (`web/src/lib/server-api.ts`) for SSR — same auth path, but returns parsed JSON instead of piping a Response.
 
 ### 3.3 SSE for chat — the critical path
 

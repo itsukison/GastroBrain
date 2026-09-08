@@ -3,7 +3,7 @@
 import { useEffect, useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter, usePathname } from "next/navigation";
-import { Plus, Trash2, LogOut, Settings, BookOpen, Mic } from "lucide-react";
+import { BookOpen, LogOut, Mic, Plus, Settings, Trash2, Video } from "lucide-react";
 import type { ThreadSummary } from "@/types";
 import { cn } from "@/lib/cn";
 import { SettingsModal, type Tab as SettingsTab } from "./settings-modal";
@@ -218,6 +218,14 @@ export function ThreadSidebar({ initial, userEmail }: { initial: ThreadSummary[]
               aria-label="音声で質問"
             >
               <Mic className="w-3.5 h-3.5" aria-hidden />
+            </Link>
+            <Link
+              href="/meetings"
+              className="h-6 w-6 grid place-items-center rounded-md hover:bg-sidebar-accent hover:text-foreground transition"
+              title="会議"
+              aria-label="会議"
+            >
+              <Video className="w-3.5 h-3.5" aria-hidden />
             </Link>
             <button
               type="button"

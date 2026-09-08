@@ -10,15 +10,17 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import logging
 import re
 import secrets
 import time
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, status
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
@@ -61,6 +63,10 @@ router = APIRouter(prefix="/v1")
 
 class ThreadCreateBody(BaseModel):
     title: str | None = None
+    # Set when the thread is "ask a question about this meeting" (§4). The
+    # caller must be a participant; the meeting's transcript then rides along
+    # into every turn of this thread.
+    meeting_id: UUID | None = None
 
 
 class ThreadPatchBody(BaseModel):
@@ -143,13 +149,15 @@ class MessageOut(BaseModel):
 async def create_thread(body: ThreadCreateBody, user: AuthUser = Depends(require_user)) -> ThreadOut:
     def _do() -> dict:
         with conn() as c, c.cursor() as cur:
+            if body.meeting_id is not None:
+                _require_participant(cur, body.meeting_id, user.email)
             cur.execute(
                 """
-                INSERT INTO conversations (user_id, title)
-                VALUES (%s, COALESCE(%s, '新規チャット'))
+                INSERT INTO conversations (user_id, title, meeting_id)
+                VALUES (%s, COALESCE(%s, '新規チャット'), %s)
                 RETURNING id, title, created_at, updated_at, archived_at
                 """,
-                (str(user.user_id), body.title),
+                (str(user.user_id), body.title, str(body.meeting_id) if body.meeting_id else None),
             )
             row = cur.fetchone()
             c.commit()
@@ -442,13 +450,14 @@ async def chat(body: ChatBody, user: AuthUser = Depends(require_user)) -> EventS
     `rerank_done`, `token`, `citations`, `done`, `error`.
     """
     log.info("chat: prep start conversation=%s user=%s", body.conversation_id, user.user_id)
-    history, _, prefs, scope = await asyncio.to_thread(
+    history, _, prefs, scope, meeting_context = await asyncio.to_thread(
         _prep_turn,
         conversation_id=body.conversation_id,
         user=user,
         question=body.question,
     )
-    log.info("chat: prep done history_len=%d prefs=%s scope=%s", len(history), prefs, scope)
+    log.info("chat: prep done history_len=%d prefs=%s scope=%s meeting=%s",
+             len(history), prefs, scope, meeting_context is not None)
 
     async def _events():
         # Emit immediately so the client can distinguish "Cloud Run accepted +
@@ -462,6 +471,7 @@ async def chat(body: ChatBody, user: AuthUser = Depends(require_user)) -> EventS
                 surface="web",
                 prefs=prefs,
                 scope=scope,
+                extra_context=meeting_context,
             )
             final: AnswerDone | None = None
             token_count = 0
@@ -532,7 +542,7 @@ async def chat(body: ChatBody, user: AuthUser = Depends(require_user)) -> EventS
 @router.post("/voice/ask", response_model=VoiceAnswerOut)
 async def voice_ask(body: VoiceAskBody, user: AuthUser = Depends(require_user)) -> VoiceAnswerOut:
     log.info("voice/ask: start conversation=%s user=%s", body.conversation_id, user.user_id)
-    history, _, prefs, scope = await asyncio.to_thread(
+    history, _, prefs, scope, meeting_context = await asyncio.to_thread(
         _prep_turn,
         conversation_id=body.conversation_id,
         user=user,
@@ -547,6 +557,7 @@ async def voice_ask(body: VoiceAskBody, user: AuthUser = Depends(require_user)) 
         surface="voice",
         prefs=prefs,
         scope=scope,
+        extra_context=meeting_context,
     )
     final: AnswerDone | None = None
     async for ev in run_pipeline(inp):
@@ -1116,6 +1127,714 @@ async def delete_folder_acl(rule_id: UUID, _: AuthUser = Depends(require_admin))
 
 
 # --------------------------------------------------------------------------------------
+# Meetings — the 商談AI surface. See docs/MEETINGS_WEB.md.
+#
+# Two callers, two kinds of auth. The AI participant runs on a VPS with no
+# Supabase user, so its writes carry a service token in X-Meeting-Agent-Token
+# (§6.1). The browser reads with the normal user JWT and is gated on the
+# Calendar attendee list (§5). Every query filters on the caller's email
+# explicitly; the RLS policies in 014_meetings.sql are defence-in-depth.
+# --------------------------------------------------------------------------------------
+
+_MEETING_STATUSES = {"scheduled", "joining", "live", "ended", "failed"}
+_AGENT_STATES = {"asleep", "open"}
+_ALLOWED_SHARE_DOMAIN = "@gastroduce-japan.co.jp"
+
+# How much transcript to put in front of the model. A 60-minute meeting is very
+# roughly 40k characters of captions; the tail is what people ask about, so both
+# caps take the end. Raise if summaries start missing the opening.
+_TRANSCRIPT_PROMPT_CHARS = 16_000
+_SUMMARY_TRANSCRIPT_CHARS = 60_000
+
+
+class MeetingAttendee(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    is_organizer: bool = False
+
+
+class MeetingUpsertBody(BaseModel):
+    google_event_id: str = Field(min_length=1, max_length=1024)
+    title: str | None = Field(default=None, max_length=500)
+    meet_url: str | None = Field(default=None, max_length=1000)
+    scheduled_at: datetime
+    # The access-control list (§5). Empty is accepted but leaves the meeting
+    # readable by nobody, so it is logged as a warning rather than silently kept.
+    attendees: list[MeetingAttendee] = Field(default_factory=list)
+
+
+class MeetingPatchBody(BaseModel):
+    """Both callers PATCH this path (§6.2). The agent may set status,
+    started_at and agent_state; the browser may set title. Each is rejected on
+    the other's fields."""
+
+    title: str | None = Field(default=None, max_length=500)
+    status: str | None = None
+    started_at: datetime | None = None
+    # Agent-only. The 90 s idle expiry out of `open` is timed on the meeting
+    # side (§6.4), so the agent needs a way to write the result back. Without
+    # it the row stays `open` after the gate has closed, the agent re-reads its
+    # own stale value on the next 3 s poll and re-opens, and the timeout never
+    # takes effect — while the UI shows a state the agent is not in.
+    agent_state: str | None = None
+
+
+class SegmentIn(BaseModel):
+    seq: int = Field(ge=0)
+    speaker: str = Field(max_length=200)
+    text: str = Field(max_length=10_000)
+    spoken_at: datetime
+
+
+class SegmentsBody(BaseModel):
+    segments: list[SegmentIn] = Field(default_factory=list, max_length=500)
+
+
+class MeetingEndBody(BaseModel):
+    ended_at: datetime | None = None
+
+
+class AgentStateBody(BaseModel):
+    agent_state: str
+
+
+class MeetingShareBody(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+
+
+def meeting_visible_sql(alias: str = "m") -> str:
+    """SQL predicate for "this caller may read this meeting". Takes one %s
+    parameter: the caller's email.
+
+    Kept as a function, like `retrieve.access_sql`, so the gate is written once
+    and can be unit-tested without a database."""
+    return (
+        f"{alias}.deleted_at IS NULL AND EXISTS ("
+        "SELECT 1 FROM meeting_participants p "
+        f"WHERE p.meeting_id = {alias}.id AND p.email = lower(%s))"
+    )
+
+
+async def require_meeting_agent(
+    x_meeting_agent_token: str | None = Header(default=None),
+) -> None:
+    """The VPS's service token (§6.1). Constant-time compare; an unset env var
+    closes the write paths rather than opening them."""
+    expected = get_settings().meeting_agent_token
+    if not expected:
+        raise HTTPException(status_code=503, detail="meeting agent token not configured")
+    if not x_meeting_agent_token or not hmac.compare_digest(x_meeting_agent_token, expected):
+        raise HTTPException(status_code=401, detail="invalid meeting agent token")
+
+
+async def meeting_agent_or_user(
+    authorization: str | None = Header(default=None),
+    x_meeting_agent_token: str | None = Header(default=None),
+) -> AuthUser | None:
+    """Dual auth for the one path both callers share. Returns None for the
+    meeting agent, an AuthUser for a person."""
+    expected = get_settings().meeting_agent_token
+    if (
+        x_meeting_agent_token
+        and expected
+        and hmac.compare_digest(x_meeting_agent_token, expected)
+    ):
+        return None
+    return await require_user(authorization)
+
+
+def _require_participant(cur, meeting_id: UUID, email: str | None) -> None:
+    """404 (not 403) unless the caller is on the meeting's participant list.
+    404 so the endpoint cannot be used to probe which meetings exist."""
+    cur.execute(
+        f"SELECT 1 FROM meetings m WHERE m.id = %s AND {meeting_visible_sql()}",
+        (str(meeting_id), email or ""),
+    )
+    if not cur.fetchone():
+        raise HTTPException(status_code=404, detail="meeting not found")
+
+
+def _row_to_meeting(row: tuple) -> dict:
+    return {
+        "id": str(row[0]),
+        "title": row[1],
+        "meet_url": row[2],
+        "scheduled_at": row[3].isoformat(),
+        "started_at": row[4].isoformat() if row[4] else None,
+        "ended_at": row[5].isoformat() if row[5] else None,
+        "status": row[6],
+        "agent_state": row[7],
+        "summary_status": row[8],
+        "participant_count": row[9],
+    }
+
+
+_MEETING_COLUMNS = """
+    m.id, m.title, m.meet_url, m.scheduled_at, m.started_at, m.ended_at,
+    m.status, m.agent_state, m.summary_status,
+    (SELECT count(*) FROM meeting_participants mp WHERE mp.meeting_id = m.id)
+"""
+
+
+# --------------------------------------------------------------------------------------
+# Meetings — the agent-facing write paths (§6.2)
+# --------------------------------------------------------------------------------------
+
+
+@router.post("/meetings", status_code=status.HTTP_200_OK)
+async def upsert_meeting(
+    body: MeetingUpsertBody,
+    _: None = Depends(require_meeting_agent),
+) -> dict[str, Any]:
+    """Called by the calendar watcher when it discovers the invite, and again by
+    the participant as it joins. Idempotent on google_event_id."""
+
+    def _do() -> dict[str, Any]:
+        with conn() as c, c.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO meetings (google_event_id, title, meet_url, scheduled_at)
+                VALUES (%s, COALESCE(%s, '(無題の会議)'), %s, %s)
+                ON CONFLICT (google_event_id) DO UPDATE SET
+                    -- A human rename wins over the calendar's title from then on.
+                    title = CASE WHEN meetings.renamed_at IS NULL
+                                 THEN COALESCE(EXCLUDED.title, meetings.title)
+                                 ELSE meetings.title END,
+                    meet_url = COALESCE(EXCLUDED.meet_url, meetings.meet_url),
+                    scheduled_at = EXCLUDED.scheduled_at
+                RETURNING id, status, agent_state
+                """,
+                (body.google_event_id, body.title, body.meet_url, body.scheduled_at),
+            )
+            meeting_id, mstatus, agent_state = cur.fetchone()
+
+            if body.attendees:
+                # Calendar is the source of truth for its own rows; rows a person
+                # added through "share with…" (added_by set) survive the re-sync.
+                cur.execute(
+                    "DELETE FROM meeting_participants "
+                    "WHERE meeting_id = %s AND added_by IS NULL",
+                    (str(meeting_id),),
+                )
+                for a in body.attendees:
+                    cur.execute(
+                        """
+                        INSERT INTO meeting_participants (meeting_id, email, is_organizer)
+                        VALUES (%s, lower(%s), %s)
+                        ON CONFLICT (meeting_id, email) DO NOTHING
+                        """,
+                        (str(meeting_id), a.email.strip(), a.is_organizer),
+                    )
+            else:
+                log.warning(
+                    "meetings: upsert with no attendees event=%s — nobody can read it",
+                    body.google_event_id,
+                )
+            c.commit()
+            return {
+                "id": str(meeting_id),
+                "status": mstatus,
+                "agent_state": agent_state,
+            }
+
+    return await asyncio.to_thread(_do)
+
+
+@router.patch("/meetings/{meeting_id}")
+async def patch_meeting(
+    meeting_id: UUID,
+    body: MeetingPatchBody,
+    caller: AuthUser | None = Depends(meeting_agent_or_user),
+) -> dict[str, Any]:
+    """Agent: status, started_at, agent_state (the 90 s expiry writing itself
+    back, §6.4). Browser: title (§7.1's editable title)."""
+    is_agent = caller is None
+
+    sets: list[str] = []
+    params: list[Any] = []
+    if is_agent:
+        if body.title is not None:
+            raise HTTPException(status_code=403, detail="the agent may not rename a meeting")
+        if body.status is not None:
+            if body.status not in _MEETING_STATUSES:
+                raise HTTPException(status_code=400, detail="invalid status")
+            sets.append("status = %s")
+            params.append(body.status)
+        if body.started_at is not None:
+            sets.append("started_at = %s")
+            params.append(body.started_at)
+        if body.agent_state is not None:
+            if body.agent_state not in _AGENT_STATES:
+                raise HTTPException(status_code=400, detail="invalid agent_state")
+            sets.append("agent_state = %s")
+            params.append(body.agent_state)
+    else:
+        if body.status is not None or body.started_at is not None:
+            raise HTTPException(status_code=403, detail="only the agent may set status")
+        if body.agent_state is not None:
+            # Not a capability difference — the browser has POST /state for
+            # this. One path per caller keeps "who last wrote it" readable.
+            raise HTTPException(
+                status_code=403, detail="use POST /v1/meetings/{id}/state"
+            )
+        if body.title is not None:
+            sets.append("title = %s")
+            sets.append("renamed_at = now()")
+            params.append(body.title.strip() or "(無題の会議)")
+    if not sets:
+        raise HTTPException(status_code=400, detail="no fields to update")
+
+    def _do() -> dict[str, Any]:
+        with conn() as c, c.cursor() as cur:
+            if not is_agent:
+                _require_participant(cur, meeting_id, caller.email)
+            cur.execute(
+                f"""
+                UPDATE meetings m SET {', '.join(sets)}
+                WHERE m.id = %s AND m.deleted_at IS NULL
+                RETURNING {_MEETING_COLUMNS}
+                """,
+                [*params, str(meeting_id)],
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="meeting not found")
+            c.commit()
+            return _row_to_meeting(row)
+
+    return await asyncio.to_thread(_do)
+
+
+@router.post("/meetings/{meeting_id}/segments")
+async def post_segments(
+    meeting_id: UUID,
+    body: SegmentsBody,
+    _: None = Depends(require_meeting_agent),
+) -> dict[str, int]:
+    """Caption lines, batched every few seconds.
+
+    The VPS retries on network failure and may resend a whole batch, so this is
+    idempotent on (meeting_id, seq) and makes no assumption about ordering or
+    exactly-once delivery (§6.2)."""
+    if not body.segments:
+        return {"inserted": 0}
+
+    def _do() -> dict[str, int]:
+        with conn() as c, c.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM meetings WHERE id = %s AND deleted_at IS NULL",
+                (str(meeting_id),),
+            )
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="meeting not found")
+
+            values: list[Any] = []
+            rows: list[str] = []
+            for s in body.segments:
+                rows.append("(%s, %s, %s, %s, %s)")
+                values.extend([str(meeting_id), s.seq, s.speaker, s.text, s.spoken_at])
+            cur.execute(
+                f"""
+                INSERT INTO meeting_segments (meeting_id, seq, speaker, text, spoken_at)
+                VALUES {', '.join(rows)}
+                ON CONFLICT (meeting_id, seq) DO NOTHING
+                """,
+                values,
+            )
+            inserted = cur.rowcount
+            c.commit()
+            return {"inserted": inserted}
+
+    return await asyncio.to_thread(_do)
+
+
+@router.post("/meetings/{meeting_id}/end", status_code=status.HTTP_202_ACCEPTED)
+async def end_meeting(
+    meeting_id: UUID,
+    body: MeetingEndBody,
+    background: BackgroundTasks,
+    _: None = Depends(require_meeting_agent),
+) -> dict[str, str]:
+    """The AI is leaving. Summary generation runs after the response: the VPS is
+    tearing the session down and should not hold a connection open for a model
+    call. If the process dies before it finishes, summary_status stays 'pending'
+    and the detail page's 再生成 button re-runs it."""
+
+    def _do() -> None:
+        with conn() as c, c.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE meetings
+                SET status = 'ended',
+                    ended_at = COALESCE(%s, now()),
+                    summary_status = 'pending',
+                    agent_state = 'asleep'
+                WHERE id = %s AND deleted_at IS NULL
+                """,
+                (body.ended_at, str(meeting_id)),
+            )
+            if cur.rowcount == 0:
+                raise HTTPException(status_code=404, detail="meeting not found")
+            c.commit()
+
+    await asyncio.to_thread(_do)
+    background.add_task(_summarize_meeting_safe, meeting_id)
+    return {"status": "ended"}
+
+
+@router.get("/meetings/{meeting_id}/state")
+async def get_meeting_state(
+    meeting_id: UUID,
+    _: None = Depends(require_meeting_agent),
+) -> dict[str, str]:
+    """Polled by the VPS every ~3 s. This is the only control channel — we never
+    call the meeting agent (§6.3)."""
+
+    def _do() -> dict[str, str]:
+        with conn() as c, c.cursor() as cur:
+            cur.execute(
+                "SELECT agent_state FROM meetings WHERE id = %s AND deleted_at IS NULL",
+                (str(meeting_id),),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="meeting not found")
+            return {"agent_state": row[0]}
+
+    return await asyncio.to_thread(_do)
+
+
+# --------------------------------------------------------------------------------------
+# Meetings — the browser-facing paths (§7.2)
+# --------------------------------------------------------------------------------------
+
+
+@router.get("/meetings")
+async def list_meetings(
+    limit: int = 50,
+    user: AuthUser = Depends(require_user),
+) -> dict[str, Any]:
+    limit = max(1, min(limit, 200))
+
+    def _do() -> dict[str, Any]:
+        with conn() as c, c.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT {_MEETING_COLUMNS}
+                FROM meetings m
+                WHERE {meeting_visible_sql()}
+                ORDER BY m.scheduled_at DESC
+                LIMIT %s
+                """,
+                (user.email or "", limit),
+            )
+            return {"meetings": [_row_to_meeting(r) for r in cur.fetchall()]}
+
+    return await asyncio.to_thread(_do)
+
+
+@router.get("/meetings/{meeting_id}")
+async def get_meeting(
+    meeting_id: UUID,
+    user: AuthUser = Depends(require_user),
+) -> dict[str, Any]:
+    """Detail: the meeting, its transcript, its participants, its summary, and
+    this user's own Q&A threads about it."""
+
+    def _do() -> dict[str, Any]:
+        with conn() as c, c.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT {_MEETING_COLUMNS}, m.summary, m.next_actions
+                FROM meetings m
+                WHERE m.id = %s AND {meeting_visible_sql()}
+                """,
+                (str(meeting_id), user.email or ""),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="meeting not found")
+            meeting = _row_to_meeting(row)
+            meeting["summary"] = row[10]
+            meeting["next_actions"] = row[11]
+
+            cur.execute(
+                """
+                SELECT email, is_organizer, added_by IS NOT NULL
+                FROM meeting_participants
+                WHERE meeting_id = %s
+                ORDER BY is_organizer DESC, email
+                """,
+                (str(meeting_id),),
+            )
+            participants = [
+                {"email": r[0], "is_organizer": r[1], "shared": r[2]}
+                for r in cur.fetchall()
+            ]
+
+            cur.execute(
+                """
+                SELECT seq, speaker, text, spoken_at
+                FROM meeting_segments
+                WHERE meeting_id = %s
+                ORDER BY seq
+                """,
+                (str(meeting_id),),
+            )
+            segments = [
+                {
+                    "seq": r[0],
+                    "speaker": r[1],
+                    "text": r[2],
+                    "spoken_at": r[3].isoformat(),
+                }
+                for r in cur.fetchall()
+            ]
+
+            cur.execute(
+                """
+                SELECT id, title, created_at, updated_at, archived_at
+                FROM conversations
+                WHERE meeting_id = %s AND user_id = %s AND deleted_at IS NULL
+                ORDER BY updated_at DESC
+                """,
+                (str(meeting_id), str(user.user_id)),
+            )
+            threads = [_row_to_thread(r) for r in cur.fetchall()]
+
+            return {
+                "meeting": meeting,
+                "participants": participants,
+                "segments": segments,
+                "threads": threads,
+            }
+
+    return await asyncio.to_thread(_do)
+
+
+@router.post("/meetings/{meeting_id}/state")
+async def set_meeting_state(
+    meeting_id: UUID,
+    body: AgentStateBody,
+    user: AuthUser = Depends(require_user),
+) -> dict[str, str]:
+    """The asleep/open toggle on the live row. The VPS picks this up within ~3 s
+    on its next poll; the 90 s idle expiry belongs to the meeting side, not here
+    (§6.4)."""
+    if body.agent_state not in _AGENT_STATES:
+        raise HTTPException(status_code=400, detail="invalid agent_state")
+
+    def _do() -> dict[str, str]:
+        with conn() as c, c.cursor() as cur:
+            _require_participant(cur, meeting_id, user.email)
+            cur.execute(
+                "UPDATE meetings SET agent_state = %s WHERE id = %s RETURNING agent_state",
+                (body.agent_state, str(meeting_id)),
+            )
+            row = cur.fetchone()
+            c.commit()
+            return {"agent_state": row[0]}
+
+    return await asyncio.to_thread(_do)
+
+
+@router.post("/meetings/{meeting_id}/share")
+async def share_meeting(
+    meeting_id: UUID,
+    body: MeetingShareBody,
+    user: AuthUser = Depends(require_user),
+) -> dict[str, Any]:
+    """Grant a colleague who was not on the invite. Same-domain only: the login
+    itself is domain-gated, so an outside address could never read the row and
+    would just be a confusing no-op."""
+    email = body.email.strip().lower()
+    if not email.endswith(_ALLOWED_SHARE_DOMAIN):
+        raise HTTPException(status_code=400, detail="社内アドレスのみ共有できます")
+
+    def _do() -> dict[str, Any]:
+        with conn() as c, c.cursor() as cur:
+            _require_participant(cur, meeting_id, user.email)
+            cur.execute(
+                """
+                INSERT INTO meeting_participants (meeting_id, email, added_by)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (meeting_id, email) DO NOTHING
+                """,
+                (str(meeting_id), email, (user.email or "").lower()),
+            )
+            c.commit()
+            return {"email": email}
+
+    return await asyncio.to_thread(_do)
+
+
+@router.delete("/meetings/{meeting_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_meeting(meeting_id: UUID, user: AuthUser = Depends(require_user)) -> None:
+    def _do() -> None:
+        with conn() as c, c.cursor() as cur:
+            _require_participant(cur, meeting_id, user.email)
+            cur.execute(
+                "UPDATE meetings SET deleted_at = now() WHERE id = %s AND deleted_at IS NULL",
+                (str(meeting_id),),
+            )
+            c.commit()
+
+    await asyncio.to_thread(_do)
+
+
+@router.post("/meetings/{meeting_id}/summary", status_code=status.HTTP_202_ACCEPTED)
+async def regenerate_summary(
+    meeting_id: UUID,
+    background: BackgroundTasks,
+    user: AuthUser = Depends(require_user),
+) -> dict[str, str]:
+    """Re-run the summary. Flownote has the same button; here it doubles as the
+    recovery path when the background task on /end did not survive."""
+
+    def _do() -> None:
+        with conn() as c, c.cursor() as cur:
+            _require_participant(cur, meeting_id, user.email)
+            cur.execute(
+                "UPDATE meetings SET summary_status = 'pending' WHERE id = %s",
+                (str(meeting_id),),
+            )
+            c.commit()
+
+    await asyncio.to_thread(_do)
+    background.add_task(_summarize_meeting_safe, meeting_id)
+    return {"summary_status": "pending"}
+
+
+# --------------------------------------------------------------------------------------
+# Meeting summary generation (§7.4)
+# --------------------------------------------------------------------------------------
+
+
+_MEETING_SUMMARY_SYSTEM = """あなたは社内会議の議事録作成者です。
+文字起こしを読み、日本語で要約とネクストアクションをまとめます。
+
+ルール:
+1. 出力は次の形式のJSONのみ。前置き・コードフェンス・説明を付けない。
+   {"summary": "…", "next_actions": [{"text": "…", "owner": "…"}]}
+2. summary は Markdown。「## 決定事項」「## 論点」「## 共有事項」のうち
+   該当する見出しのみを使い、各項目は箇条書き1〜2文でまとめる。
+3. next_actions は会議中に決まった具体的な行動のみ。owner は発言者名、
+   担当が決まっていなければ空文字にする。行動が無ければ空配列。
+4. 文字起こしに無いことを推測して書かない。聞き取れていない箇所は無視する。
+5. Slackにそのまま投稿できる簡潔さを保つ。"""
+
+
+def _transcript_text(cur, meeting_id: UUID, max_chars: int) -> str:
+    """Speaker-labelled transcript, tail-truncated to max_chars."""
+    cur.execute(
+        """
+        SELECT speaker, text FROM meeting_segments
+        WHERE meeting_id = %s ORDER BY seq
+        """,
+        (str(meeting_id),),
+    )
+    lines = [f"{r[0]}: {r[1]}" for r in cur.fetchall()]
+    body = "\n".join(lines)
+    if len(body) > max_chars:
+        body = "（前半省略）\n" + body[-max_chars:]
+    return body
+
+
+def _summarize_meeting_safe(meeting_id: UUID) -> None:
+    """Background entry point — never raises into the request that scheduled it."""
+    try:
+        _summarize_meeting(meeting_id)
+    except Exception:
+        log.exception("meeting summary failed meeting=%s", meeting_id)
+        try:
+            with conn() as c, c.cursor() as cur:
+                cur.execute(
+                    "UPDATE meetings SET summary_status = 'failed' WHERE id = %s",
+                    (str(meeting_id),),
+                )
+                c.commit()
+        except Exception:
+            log.exception("could not mark summary failed meeting=%s", meeting_id)
+
+
+def _summarize_meeting(meeting_id: UUID) -> None:
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            "SELECT title FROM meetings WHERE id = %s AND deleted_at IS NULL",
+            (str(meeting_id),),
+        )
+        row = cur.fetchone()
+        if not row:
+            return
+        title = row[0]
+        transcript = _transcript_text(cur, meeting_id, _SUMMARY_TRANSCRIPT_CHARS)
+
+    if not transcript.strip():
+        with conn() as c, c.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE meetings
+                SET summary = %s, next_actions = '[]'::jsonb, summary_status = 'ready'
+                WHERE id = %s
+                """,
+                ("文字起こしが取得できなかったため、要約はありません。", str(meeting_id)),
+            )
+            c.commit()
+        return
+
+    resp = llm.complete(
+        system=_MEETING_SUMMARY_SYSTEM,
+        messages=[
+            {
+                "role": "user",
+                "content": f"会議名: {title}\n\n--- 文字起こし ---\n{transcript}",
+            }
+        ],
+        max_tokens=1500,
+    )
+    summary, next_actions = _parse_summary(resp.text)
+
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE meetings
+            SET summary = %s, next_actions = %s::jsonb, summary_status = 'ready'
+            WHERE id = %s
+            """,
+            (summary, json.dumps(next_actions, ensure_ascii=False), str(meeting_id)),
+        )
+        c.commit()
+    log.info("meeting summary written meeting=%s actions=%d", meeting_id, len(next_actions))
+
+
+def _parse_summary(raw: str) -> tuple[str, list[dict]]:
+    """Pull summary + next_actions out of the model's reply.
+
+    The prompt asks for bare JSON, but a model that wraps it in a fence or adds a
+    sentence must not cost us the summary — fall back to storing the text as-is
+    rather than failing the whole job."""
+    text = raw.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+        text = re.sub(r"\n?```$", "", text).strip()
+    try:
+        data = json.loads(text)
+        summary = str(data.get("summary", "")).strip()
+        actions = data.get("next_actions") or []
+        if not isinstance(actions, list):
+            actions = []
+        cleaned = [
+            {"text": str(a.get("text", "")).strip(), "owner": str(a.get("owner", "")).strip()}
+            for a in actions
+            if isinstance(a, dict) and str(a.get("text", "")).strip()
+        ]
+        if summary:
+            return summary, cleaned
+    except (ValueError, AttributeError):
+        log.warning("meeting summary was not JSON; storing raw text")
+    return raw.strip(), []
+
+
+# --------------------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------------------
 
@@ -1262,9 +1981,13 @@ def _prep_turn(
     user: AuthUser,
     question: str,
     stored_question: str | None = None,
-) -> tuple[list[HistoryTurn], UUID, UserPreferences | None, AccessScope]:
+) -> tuple[list[HistoryTurn], UUID, UserPreferences | None, AccessScope, str | None]:
     """Verify thread ownership, resolve access scope, load the history window
     and prefs, and insert the user's turn — all in one transaction.
+
+    The fifth return value is the meeting transcript when the thread belongs to
+    a meeting, and None otherwise. Participation is re-checked here rather than
+    only at thread creation: access can be revoked between the two.
 
     Shared by the streaming `/chat` and the non-streaming `/voice/ask` so both
     surfaces are gated by exactly the same ACL and see the same history.
@@ -1277,13 +2000,29 @@ def _prep_turn(
     with conn() as c, c.cursor() as cur:
         cur.execute(
             """
-            SELECT 1 FROM conversations
+            SELECT meeting_id FROM conversations
             WHERE id = %s AND user_id = %s AND deleted_at IS NULL
             """,
             (str(conversation_id), str(user.user_id)),
         )
-        if not cur.fetchone():
+        conv_row = cur.fetchone()
+        if not conv_row:
             raise HTTPException(status_code=404, detail="thread not found")
+
+        meeting_context: str | None = None
+        if conv_row[0] is not None:
+            _require_participant(cur, conv_row[0], user.email)
+            cur.execute(
+                "SELECT title, summary FROM meetings WHERE id = %s",
+                (str(conv_row[0]),),
+            )
+            m_title, m_summary = cur.fetchone()
+            transcript = _transcript_text(cur, conv_row[0], _TRANSCRIPT_PROMPT_CHARS)
+            meeting_context = (
+                f"以下は社内会議「{m_title}」の記録です。\n\n"
+                + (f"要約:\n{m_summary}\n\n" if m_summary else "")
+                + f"文字起こし:\n{transcript}"
+            )
 
         # Access scope (gates which docs retrieval may surface). Resolved by
         # email — the universal identity across web/Slack/MCP. No member row
@@ -1328,7 +2067,7 @@ def _prep_turn(
             prefs = None
 
         c.commit()
-        return history, user_msg_id, prefs, scope
+        return history, user_msg_id, prefs, scope, meeting_context
 
 
 def _persist_assistant_turn(

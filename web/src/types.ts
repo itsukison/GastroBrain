@@ -76,3 +76,55 @@ export type ChatStreamEvent =
       };
     }
   | { event: "error"; data: { message: string } };
+
+// ── Meetings (商談AI) ──────────────────────────────────────────────────────
+// See docs/MEETINGS_WEB.md. `status` and `agent_state` mirror the CHECK
+// constraints in migrations/014_meetings.sql; `agent_state` has two values on
+// purpose (§6.4) and its 90 s expiry is enforced on the meeting side.
+
+export type MeetingStatus = "scheduled" | "joining" | "live" | "ended" | "failed";
+export type AgentState = "asleep" | "open";
+export type SummaryStatus = "pending" | "ready" | "failed";
+
+export type MeetingRow = {
+  id: string;
+  title: string;
+  meet_url: string | null;
+  scheduled_at: string;
+  started_at: string | null;
+  ended_at: string | null;
+  status: MeetingStatus;
+  agent_state: AgentState;
+  summary_status: SummaryStatus;
+  participant_count: number;
+};
+
+export type NextAction = { text: string; owner: string };
+
+export type MeetingDetail = MeetingRow & {
+  summary: string | null;
+  next_actions: NextAction[] | null;
+};
+
+export type MeetingSegment = {
+  seq: number;
+  speaker: string;
+  text: string;
+  spoken_at: string;
+};
+
+export type MeetingParticipant = {
+  email: string;
+  is_organizer: boolean;
+  /** Added by hand through "共有" rather than by the Calendar invite. */
+  shared: boolean;
+};
+
+/** GET /api/meetings/[id]. `threads` is only ever the caller's own Q&A threads
+ *  about this meeting — one thread per person (§4). */
+export type MeetingDetailResponse = {
+  meeting: MeetingDetail;
+  participants: MeetingParticipant[];
+  segments: MeetingSegment[];
+  threads: ThreadSummary[];
+};

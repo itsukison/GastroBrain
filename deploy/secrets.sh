@@ -61,6 +61,8 @@ create_or_update GASTROBRAIN_MCP_TOKENS "MCP bearer tokens, 'label:tok_xxx,label
 create_or_update GOOGLE_OAUTH_CLIENT_ID     "Google OAuth client ID (xxxxxx.apps.googleusercontent.com)"
 create_or_update GOOGLE_OAUTH_CLIENT_SECRET "Google OAuth client secret"
 
+create_or_update MEETING_AGENT_TOKEN "商談AI VPS の共有トークン (blank to close /v1/meetings writes)"
+
 mint_if_absent() {
   local name="$1"
   local prompt="$2"
@@ -91,7 +93,7 @@ if [[ -z "$SA" ]]; then
 fi
 echo "  Cloud Run SA: $SA"
 
-for s in DATABASE_URL CLAUDE_API_KEY OPENAI_API_KEY COHERE_API SLACK_BOT_TOKEN SLACK_SIGNING_SECRET CHATWORK_API LANGFUSE_PUBLIC_KEY LANGFUSE_SECRET_KEY GASTROBRAIN_MCP_TOKENS GOOGLE_OAUTH_CLIENT_ID GOOGLE_OAUTH_CLIENT_SECRET GASTROBRAIN_OAUTH_JWT_KEY GASTROBRAIN_OAUTH_STATE_KEY; do
+for s in DATABASE_URL CLAUDE_API_KEY OPENAI_API_KEY COHERE_API SLACK_BOT_TOKEN SLACK_SIGNING_SECRET CHATWORK_API LANGFUSE_PUBLIC_KEY LANGFUSE_SECRET_KEY GASTROBRAIN_MCP_TOKENS GOOGLE_OAUTH_CLIENT_ID GOOGLE_OAUTH_CLIENT_SECRET GASTROBRAIN_OAUTH_JWT_KEY GASTROBRAIN_OAUTH_STATE_KEY MEETING_AGENT_TOKEN; do
   if gcloud secrets describe "$s" >/dev/null 2>&1; then
     gcloud secrets add-iam-policy-binding "$s" \
       --member="serviceAccount:$SA" \

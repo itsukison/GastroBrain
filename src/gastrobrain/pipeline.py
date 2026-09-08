@@ -115,6 +115,10 @@ class PipelineInput:
     # Caller's access scope (gastrobrain.access). Gates which documents are
     # searchable. Defaults to PUBLIC_ONLY (fail-closed).
     scope: AccessScope = PUBLIC_ONLY
+    # Non-retrieved evidence prepended to the generation prompt — a meeting
+    # transcript when the thread belongs to a meeting. Already ACL-checked by the
+    # caller; retrieval never sees it.
+    extra_context: str | None = None
 
 
 async def run_pipeline(inp: PipelineInput) -> AsyncIterator[PipelineEvent]:
@@ -166,6 +170,7 @@ async def run_pipeline(inp: PipelineInput) -> AsyncIterator[PipelineEvent]:
             for ev in answer_stream(
                 inp.question, chunks, inp.history,
                 surface=inp.surface, prefs=inp.prefs,
+                extra_context=inp.extra_context,
             ):
                 queue.put_nowait(ev)
         except Exception as e:  # noqa: BLE001
