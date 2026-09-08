@@ -26,12 +26,15 @@ import {
 import type { Citation, VoiceAnswer, VoiceSessionInit } from "@/types";
 import { cn } from "@/lib/cn";
 import {
-  attachWakeWordGate,
+  attachMeetingGate,
   isMeetingMode,
   openMeetingAudio,
   usesDefaultAudio,
   MEETING_INSTRUCTIONS,
+  type AgentState,
   type GateState,
+  type MeetingControl,
+  type MeetingGate,
 } from "@/lib/meeting-mode";
 
 type Status = "idle" | "connecting" | "live" | "ended" | "error";
@@ -225,6 +228,10 @@ export function VoiceSession() {
   // Testing aid: meeting behaviour on the laptop microphone. See lib/meeting-mode.ts.
   const defaultAudio = meeting && usesDefaultAudio(params);
   const [gate, setGate] = useState<GateState>("listening");
+  // Whether the agent will answer without being named. Sticky — see
+  // lib/meeting-mode.ts; the one-shot gate this replaced went deaf after the
+  // first answer, so follow-up questions were silently ignored.
+  const [agentState, setAgentState] = useState<AgentState>("asleep");
 
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -250,12 +257,15 @@ export function VoiceSession() {
   const [sourceVersion, setSourceVersion] = useState(0);
 
   const sessionRef = useRef<RealtimeSession | null>(null);
+  const gateRef = useRef<MeetingGate | null>(null);
   const conversationRef = useRef<string | null>(null);
   const answeredRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const pinnedRef = useRef(true);
 
   const stop = useCallback(() => {
+    gateRef.current?.close();
+    gateRef.current = null;
     sessionRef.current?.close();
     sessionRef.current = null;
     setSearching(false);
@@ -264,7 +274,13 @@ export function VoiceSession() {
 
   // Close the transport if the user navigates away mid-conversation —
   // otherwise the session keeps billing until OpenAI times it out.
-  useEffect(() => () => sessionRef.current?.close(), []);
+  useEffect(
+    () => () => {
+      gateRef.current?.close();
+      sessionRef.current?.close();
+    },
+    [],
+  );
 
   useEffect(() => {
     if (status !== "live") return;
@@ -452,7 +468,12 @@ export function VoiceSession() {
         },
       });
 
-      if (meeting) attachWakeWordGate(session, setGate);
+      if (meeting) {
+        gateRef.current = attachMeetingGate(session, {
+          onState: setAgentState,
+          onActivity: setGate,
+        });
+      }
 
       session.on("history_updated", (history) => setLines(toLines(history)));
       session.on("agent_tool_start", () => setSearching(true));
@@ -475,6 +496,8 @@ export function VoiceSession() {
     } catch (e) {
       const detail = describeError(e);
       console.error("voice session failed:", detail, e);
+      gateRef.current?.close();
+      gateRef.current = null;
       sessionRef.current?.close();
       sessionRef.current = null;
       setError(friendlyError(detail));
@@ -496,10 +519,34 @@ export function VoiceSession() {
     if (!meeting) return;
     const root = document.documentElement;
     root.dataset.meetingStatus = status === "live" ? gate : status;
+    // Separate attribute rather than a new value of meetingStatus, because
+    // Meetron's launcher already reads that one and "asleep" is orthogonal to
+    // "connecting"/"error" — the agent can be asleep only once it is live.
+    root.dataset.meetingAgentState = agentState;
     return () => {
       delete root.dataset.meetingStatus;
+      delete root.dataset.meetingAgentState;
     };
-  }, [meeting, status, gate]);
+  }, [meeting, status, gate, agentState]);
+
+  // Control surface for Meetron, which drives this tab over CDP. The Meet chat
+  // reader lives in the *other* tab (the meeting), so a command typed in chat
+  // reaches the agent by being evaluated against this window. Same reasoning as
+  // the data attributes above: the page publishes a contract, and Meetron never
+  // has to reach inside React.
+  useEffect(() => {
+    if (!meeting) return;
+    const api: MeetingControl = {
+      state: () => gateRef.current?.state ?? "asleep",
+      set: (next, reason) => gateRef.current?.set(next, reason ?? "external"),
+      ask: (text) => gateRef.current?.ask(text),
+      command: (text) => gateRef.current?.command(text) ?? "ignored",
+    };
+    (window as Window & { meetingControl?: MeetingControl }).meetingControl = api;
+    return () => {
+      delete (window as Window & { meetingControl?: MeetingControl }).meetingControl;
+    };
+  }, [meeting]);
 
   const toggleMute = useCallback(() => {
     const session = sessionRef.current;
@@ -537,7 +584,11 @@ export function VoiceSession() {
               live, but it is what you check over CDP when the agent is silent. */}
           {meeting && live && (
             <span className="text-xs text-muted-foreground">
-              {gate === "answering" ? "応答中" : "待機中（呼ばれるまで発言しません）"}
+              {gate === "answering"
+                ? "応答中"
+                : agentState === "open"
+                  ? "受付中（名前なしで質問できます）"
+                  : "待機中（呼ばれるまで発言しません）"}
             </span>
           )}
 
