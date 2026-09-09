@@ -27,6 +27,7 @@ echo "  - GOOGLE_OAUTH_CLIENT_ID  (optional, for /mcp/ OAuth)"
 echo "  - GOOGLE_OAUTH_CLIENT_SECRET  (optional, for /mcp/ OAuth)"
 echo "  - GASTROBRAIN_OAUTH_JWT_KEY  (optional, auto-mint if blank)"
 echo "  - GASTROBRAIN_OAUTH_STATE_KEY  (optional, auto-mint if blank)"
+echo "  - MEETING_AGENT_TOKEN  (optional, blank to close /v1/meetings writes)"
 echo ""
 
 create_or_update() {
