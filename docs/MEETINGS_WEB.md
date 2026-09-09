@@ -395,7 +395,7 @@ Success criteria, per `CLAUDE.md` §4 — state them before you start, not after
 
 | Piece | Where |
 |---|---|
-| Migration | `migrations/014_meetings.sql` (**not yet applied to prod**) |
+| Migration | `migrations/014_meetings.sql` — **applied to prod** (verified 2026-09-09) |
 | Agent-facing API (§6.2) | `src/gastrobrain/web_api.py` — upsert / patch / segments / end / state |
 | Browser-facing API (§7.3) | same file — list / detail / state / share / delete / summary |
 | Summary generation (§7.4) | same file, `_summarize_meeting`; runs in the background after `/end` |
@@ -418,10 +418,23 @@ Two things are worth knowing that the spec did not anticipate:
 
 ### Still to do
 
-1. Apply `014_meetings.sql` to prod.
-2. Set `MEETING_AGENT_TOKEN` (`deploy/secrets.sh`) and redeploy Cloud Run.
-3. Confirm the two §6.2 call-site changes with the meeting-side agent.
+1. ~~Apply `014_meetings.sql` to prod.~~ **Done.** Verified 2026-09-09 against
+   project `zmbtkestevyojczqikrm`: all three tables present with RLS on,
+   `conversations.meeting_id` present, `meetings_touch_updated_at` present, 3
+   policies, 16 columns on `meetings` (so `renamed_at` is in). All at 0 rows.
+   Note it does **not** appear in `supabase_migrations` — neither do 013 and
+   several others, because this repo applies raw SQL rather than going through
+   the Supabase CLI. Expected, not a gap.
+2. ~~Set `MEETING_AGENT_TOKEN` and redeploy Cloud Run.~~ **Done.** `POST
+   /v1/meetings` with no header returns 401; `require_meeting_agent` returns 503
+   when the variable is empty and can only reach the 401 branch when it is set.
+   So the token is live on the deployed revision.
+3. ~~Confirm the two §6.2 call-site changes with the meeting-side agent.~~
+   **Confirmed 2026-09-07**, along with a gap that is now fixed: `agent_state`
+   had no service-token write path, which would have made the 90 s expiry a
+   no-op (the VPS would re-open the gate on its next poll, every 3 s, forever).
 4. Look at `/meetings` and `/meetings/[id]` with the seeded meeting below.
+   Nothing is seeded yet, so both render empty until you run it.
 
 ### Seeding a meeting to look at
 
