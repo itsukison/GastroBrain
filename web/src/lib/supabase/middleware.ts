@@ -30,6 +30,15 @@ export async function updateSession(request: NextRequest) {
   const path = request.nextUrl.pathname;
   const isAuthRoute = path === "/login" || path.startsWith("/auth/");
   if (!user && !isAuthRoute) {
+    // An API caller needs a status it can act on, not a page. `fetch` follows
+    // the redirect, so a redirected /api/* call reports 200 with an HTML body:
+    // `resp.ok` is true and `.json()` throws, which callers swallow as
+    // transient — leaving the meeting poller spinning forever on an expired
+    // session with no sign that the session is what died. 401 matches what the
+    // route handlers themselves return via `forward()`.
+    if (path.startsWith("/api/")) {
+      return NextResponse.json({ detail: "unauthenticated" }, { status: 401 });
+    }
     const url = request.nextUrl.clone();
     url.pathname = "/login";
     url.searchParams.set("next", path);
