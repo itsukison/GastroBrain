@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Link from "next/link";
+import { NavigationLink as Link } from "./navigation-link";
 import { useRouter } from "next/navigation";
 import {
   ArrowLeft,
@@ -21,6 +21,7 @@ import { Markdown } from "./markdown";
 import { parseSSE } from "@/lib/sse";
 import { STATUS_LABELS, formatClock, formatDuration, formatElapsed } from "@/lib/meetings";
 import { cn } from "@/lib/cn";
+import { useVisiblePolling } from "@/lib/use-visible-polling";
 import type {
   AgentState,
   Citation,
@@ -63,21 +64,19 @@ export function MeetingDetailView({ initial }: { initial: MeetingDetailResponse 
   const threadId = useRef<string | null>(threads[0]?.id ?? null);
   const qaEnd = useRef<HTMLDivElement | null>(null);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (signal?: AbortSignal) => {
     try {
-      const resp = await fetch(`/api/meetings/${meeting.id}`);
+      const timeout = AbortSignal.timeout(15_000);
+      const resp = await fetch(`/api/meetings/${meeting.id}`, { signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
       if (!resp.ok) return;
-      setData((await resp.json()) as MeetingDetailResponse);
+      const next = (await resp.json()) as MeetingDetailResponse;
+      if (!signal?.aborted) setData(next);
     } catch {
       // Transient — the next tick tries again.
     }
   }, [meeting.id]);
 
-  useEffect(() => {
-    if (!live && !summaryPending) return;
-    const id = setInterval(() => void refresh(), POLL_MS);
-    return () => clearInterval(id);
-  }, [live, summaryPending, refresh]);
+  useVisiblePolling(refresh, live || summaryPending, POLL_MS);
 
   // Load the existing conversation once, on mount. The meeting payload carries
   // thread summaries but not their messages, so this is a second round trip —

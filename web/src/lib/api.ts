@@ -3,7 +3,7 @@
  * Run directly; the route handlers in app/api/ read the Supabase session from
  * cookies, mint a Bearer header, and forward.
  */
-import { supabaseServer } from "@/lib/supabase/server";
+import { requestAuth } from "@/lib/request-auth";
 
 export class ApiAuthError extends Error {
   constructor() {
@@ -14,22 +14,9 @@ export class ApiAuthError extends Error {
 export async function backend() {
   const base = process.env.GASTROBRAIN_API_URL;
   if (!base) throw new Error("GASTROBRAIN_API_URL is not set");
-  const supabase = await supabaseServer();
-
-  // getUser() forces session hydration + refresh + cookie chunk re-assembly in
-  // the SSR client. Without it, getSession() can return null on the first
-  // authenticated request right after a Slack-OIDC login because the chunked
-  // auth cookie was just rotated by the middleware on the same request.
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) throw new ApiAuthError();
-
-  const {
-    data: { session },
-  } = await supabase.auth.getSession();
-  if (!session) throw new ApiAuthError();
-  return { base: base.replace(/\/$/, ""), token: session.access_token };
+  const auth = await requestAuth();
+  if (!auth) throw new ApiAuthError();
+  return { base: base.replace(/\/$/, ""), token: auth.token };
 }
 
 export async function forward(

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import Link from "next/link";
+import { BackToChatLink } from "./navigation-provider";
 import { ArrowLeft, BookOpen, Globe, Lock, Search } from "lucide-react";
 
 // ── types ─────────────────────────────────────────────────────────────────
@@ -102,13 +102,12 @@ export function AccessView({ email, initial }: { email: string; initial: MyAcces
     <div className="h-screen overflow-y-auto scrollbar-thin bg-background">
       <div className="mx-auto max-w-4xl px-6 py-8">
         <div className="flex items-center gap-3 mb-1">
-          <Link
-            href="/"
+          <BackToChatLink
             className="h-8 w-8 grid place-items-center rounded-lg text-muted-foreground hover:bg-sidebar-accent hover:text-foreground transition"
             aria-label="チャットに戻る"
           >
             <ArrowLeft className="w-4 h-4" />
-          </Link>
+          </BackToChatLink>
           <h1 className="text-[18px] font-semibold text-foreground flex items-center gap-2">
             <BookOpen className="w-[18px] h-[18px]" aria-hidden />
             アクセス資料

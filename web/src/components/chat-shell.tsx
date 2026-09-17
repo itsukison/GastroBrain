@@ -2,17 +2,13 @@
 
 import { useEffect, useState } from "react";
 import { PanelLeft } from "lucide-react";
-import { ThreadSidebar } from "./thread-sidebar";
 import { cn } from "@/lib/cn";
-import type { ThreadSummary } from "@/types";
 
 export function ChatShell({
-  initialThreads,
-  userEmail,
+  sidebar,
   children,
 }: {
-  initialThreads: ThreadSummary[];
-  userEmail: string;
+  sidebar: React.ReactNode;
   children: React.ReactNode;
 }) {
   const [collapsed, setCollapsed] = useState(false);
@@ -44,7 +40,7 @@ export function ChatShell({
         )}
         aria-hidden={collapsed}
       >
-        <ThreadSidebar initial={initialThreads} userEmail={userEmail} />
+        {sidebar}
       </div>
       <main className="flex-1 min-w-0 flex flex-col">
         <div className="h-12 flex items-center px-2 shrink-0">

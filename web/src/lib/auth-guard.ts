@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
 import type { User } from "@supabase/supabase-js";
-import { supabaseServer } from "@/lib/supabase/server";
+import { requestAuth } from "@/lib/request-auth";
 
 /**
  * Server-side auth guard. Use in Server Components / route handlers to
@@ -9,13 +9,10 @@ import { supabaseServer } from "@/lib/supabase/server";
  * request slip through — this is the load-bearing check.
  */
 export async function requireUser(nextPath?: string): Promise<User> {
-  const supabase = await supabaseServer();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) {
+  const auth = await requestAuth();
+  if (!auth) {
     const qs = nextPath ? `?next=${encodeURIComponent(nextPath)}` : "";
     redirect(`/login${qs}`);
   }
-  return user;
+  return auth.user;
 }

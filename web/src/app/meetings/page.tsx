@@ -11,13 +11,6 @@ export const dynamic = "force-dynamic";
 export default async function MeetingsPage() {
   await requireUser("/meetings");
 
-  let meetings: MeetingRow[] = [];
-  try {
-    const data = await backendGet<{ meetings: MeetingRow[] }>("/v1/meetings?limit=100");
-    meetings = data.meetings ?? [];
-  } catch {
-    // Backend transient failure — render the empty state rather than an error page.
-  }
-
-  return <MeetingsView initial={meetings} />;
+  const data = await backendGet<{ meetings: MeetingRow[] }>("/v1/meetings?limit=100");
+  return <MeetingsView initial={data.meetings ?? []} />;
 }

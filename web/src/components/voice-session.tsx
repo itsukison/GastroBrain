@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import Link from "next/link";
+import { NavigationLink as Link } from "./navigation-link";
+import { BackToChatLink } from "./navigation-provider";
 import { useSearchParams } from "next/navigation";
 import {
   ArrowDown,
@@ -562,13 +563,12 @@ export function VoiceSession() {
   return (
     <div className="flex flex-col h-dvh bg-background text-foreground">
       <header className="flex items-center gap-2 px-5 h-16 shrink-0">
-        <Link
-          href="/"
+        <BackToChatLink
           className="h-8 w-8 -ml-1.5 grid place-items-center rounded-full text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors"
           aria-label="チャットに戻る"
         >
           <ArrowLeft className="w-4 h-4" aria-hidden />
-        </Link>
+        </BackToChatLink>
         <h1 className="text-[13px] font-medium tracking-tight">
           {meeting ? "商談AI（会議モード）" : "音声で質問"}
           {/* Unmissable: this session is on the laptop mic, not the meeting. */}

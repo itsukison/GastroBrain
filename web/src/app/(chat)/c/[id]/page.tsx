@@ -1,7 +1,7 @@
 import { notFound } from "next/navigation";
 import { ChatThread } from "@/components/chat-thread";
 import { RuntimeProvider } from "@/components/runtime-provider";
-import { backendGet } from "@/lib/server-api";
+import { backendGet, BackendReadError } from "@/lib/server-api";
 import type { MessageRow, ThreadSummary } from "@/types";
 
 export const dynamic = "force-dynamic";
@@ -18,8 +18,9 @@ export default async function ChatPage({
     data = await backendGet<{ thread: ThreadSummary; messages: MessageRow[] }>(
       `/v1/threads/${id}`,
     );
-  } catch {
-    notFound();
+  } catch (error) {
+    if (error instanceof BackendReadError && error.status === 404) notFound();
+    throw error;
   }
 
   return (

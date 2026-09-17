@@ -60,13 +60,20 @@ The Next.js layer never touches the database directly — it proxies through the
 | `src/components/thread-sidebar.tsx` | ChatGPT-style sidebar — plain React component, polls `/api/threads` every 30s |
 | `src/lib/sse.ts` | Manual SSE parser (browser EventSource doesn't support POST + headers) |
 | `src/lib/api.ts` | `forward()` helper used by every `/api/*` route to add `Authorization: Bearer <Supabase JWT>` |
-| `middleware.ts` | Auth gate — redirects unauthenticated traffic to `/login` |
+| `src/middleware.ts` | Auth gate — beside `src/app` so production builds include it; redirects unauthenticated traffic to `/login` |
 
 ## Streaming invariant
 
 `runtime-provider.tsx` mutates the placeholder assistant message **in place by id** as tokens arrive. Replacing it with a new message object spawns spurious assistant-ui branches. After the stream finishes, the local UUID is swapped for the server-issued `message_id` so feedback POSTs target the persisted row.
 
 ## Verifying end-to-end
+
+Run `npm test` and `npm run typecheck` for local checks. Run
+`node scripts/check-navigation.mjs` for production-mode streaming/auth checks:
+it builds a temporary copy with synthetic Supabase/backend endpoints, checks
+that skeletons arrive before delayed data and that authentication is shared
+within each render but isolated between users, then cleans up. It uses only
+localhost fixtures and does not change `.env` or the project's `.next` build.
 
 1. `npm run dev`, sign in with Slack, ask a question — tokens should stream within ~2s, citation chips appear, click-through goes to NotePM.
 2. Reload the page — sidebar shows the thread, click it, history rehydrates with citations.

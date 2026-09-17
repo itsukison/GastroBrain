@@ -1,7 +1,7 @@
 import { notFound } from "next/navigation";
 
 import { requireUser } from "@/lib/auth-guard";
-import { backendGet } from "@/lib/server-api";
+import { backendGet, BackendReadError } from "@/lib/server-api";
 import { MeetingDetailView } from "@/components/meeting-detail";
 import type { MeetingDetailResponse } from "@/types";
 
@@ -14,11 +14,12 @@ export default async function MeetingPage({ params }: { params: Promise<{ id: st
   let data: MeetingDetailResponse;
   try {
     data = await backendGet<MeetingDetailResponse>(`/v1/meetings/${id}`);
-  } catch {
+  } catch (error) {
     // The backend answers 404 both for "no such meeting" and "not yours", so
     // that a URL cannot be used to probe which meetings exist. Same here.
-    notFound();
+    if (error instanceof BackendReadError && error.status === 404) notFound();
+    throw error;
   }
 
-  return <MeetingDetailView initial={data} />;
+  return <MeetingDetailView key={id} initial={data} />;
 }

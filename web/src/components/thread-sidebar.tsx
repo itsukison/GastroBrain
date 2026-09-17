@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useState, useTransition } from "react";
-import Link from "next/link";
+import { NavigationLink as Link } from "./navigation-link";
 import { useRouter, usePathname } from "next/navigation";
-import { BookOpen, LogOut, Mic, Plus, Settings, Trash2, Video } from "lucide-react";
+import { BookOpen, Loader2, LogOut, Mic, Plus, Settings, Trash2, Video } from "lucide-react";
 import type { ThreadSummary } from "@/types";
 import { cn } from "@/lib/cn";
 import { SettingsModal, type Tab as SettingsTab } from "./settings-modal";
@@ -89,6 +89,8 @@ export function ThreadSidebar({ initial, userEmail }: { initial: ThreadSummary[]
   const [settingsTab, setSettingsTab] = useState<SettingsTab | null>(null);
   const openSettings = (tab: SettingsTab) => setSettingsTab(tab);
 
+  useEffect(() => setThreads(initial), [initial]);
+
   useEffect(() => {
     // Light periodic refresh (every 30s while focused) so newly created threads
     // appear without manual reload. router.refresh() re-runs the server layout.
@@ -164,8 +166,8 @@ export function ThreadSidebar({ initial, userEmail }: { initial: ThreadSummary[]
             disabled={pending}
             className="w-full h-9 rounded-lg border border-sidebar-border bg-transparent hover:bg-sidebar-accent text-foreground flex items-center gap-2 px-3 text-sm transition disabled:opacity-50"
           >
-            <Plus className="w-4 h-4" />
-            <span>新しいチャット</span>
+            {pending ? <Loader2 className="w-4 h-4 motion-safe:animate-spin" /> : <Plus className="w-4 h-4" />}
+            <span>{pending ? "チャットを作成中…" : "新しいチャット"}</span>
           </button>
         </div>
         <div className="flex-1 overflow-y-auto scrollbar-thin px-2 pb-2">
@@ -181,20 +183,21 @@ export function ThreadSidebar({ initial, userEmail }: { initial: ThreadSummary[]
                   <li key={t.id}>
                     <div
                       className={cn(
-                        "group flex items-center gap-2 rounded-lg px-2.5 py-2 text-sm cursor-pointer transition",
+                        "group flex items-center rounded-lg text-sm transition",
                         active
                           ? "bg-sidebar-accent text-foreground"
                           : "text-muted-foreground hover:bg-sidebar-accent hover:text-foreground",
                       )}
-                      onClick={() => router.push(`/c/${t.id}`)}
                     >
-                      <span className="flex-1 truncate">{t.title}</span>
+                      <Link href={`/c/${t.id}`} aria-current={active ? "page" : undefined} className="min-w-0 flex-1 truncate rounded-lg px-2.5 py-2">
+                        {t.title}
+                      </Link>
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
                           setPendingDelete(t.id);
                         }}
-                        className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive transition"
+                        className="mr-2.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 text-muted-foreground hover:text-destructive transition"
                         aria-label="削除"
                       >
                         <Trash2 className="w-3.5 h-3.5" />

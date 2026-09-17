@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { NavigationProvider } from "@/components/navigation-provider";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -11,7 +12,9 @@ export default function RootLayout({
 }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="ja" suppressHydrationWarning>
-      <body className="min-h-screen bg-background text-foreground">{children}</body>
+      <body className="min-h-screen bg-background text-foreground">
+        <NavigationProvider>{children}</NavigationProvider>
+      </body>
     </html>
   );
 }

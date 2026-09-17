@@ -1,12 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import Link from "next/link";
+import { NavigationLink as Link } from "./navigation-link";
+import { BackToChatLink } from "./navigation-provider";
 import { ArrowLeft, Radio, Users, Video } from "lucide-react";
 
 import { AgentStateToggle } from "./agent-state-toggle";
 import { STATUS_LABELS, formatClock, formatDuration, groupMeetings } from "@/lib/meetings";
 import { cn } from "@/lib/cn";
+import { useVisiblePolling } from "@/lib/use-visible-polling";
 import type { AgentState, MeetingRow } from "@/types";
 
 /** While something is live the page is a control surface, not a history list —
@@ -17,22 +19,20 @@ export function MeetingsView({ initial }: { initial: MeetingRow[] }) {
   const [meetings, setMeetings] = useState(initial);
   const hasLive = meetings.some((m) => m.status === "live" || m.status === "joining");
 
-  const refresh = useCallback(async () => {
+  useEffect(() => setMeetings(initial), [initial]);
+
+  const refresh = useCallback(async (signal: AbortSignal) => {
     try {
-      const resp = await fetch("/api/meetings?limit=100");
+      const resp = await fetch("/api/meetings?limit=100", { signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]) });
       if (!resp.ok) return;
       const data = (await resp.json()) as { meetings: MeetingRow[] };
-      setMeetings(data.meetings ?? []);
+      if (!signal.aborted) setMeetings(data.meetings ?? []);
     } catch {
       // Transient — the next tick tries again.
     }
   }, []);
 
-  useEffect(() => {
-    if (!hasLive) return;
-    const id = setInterval(() => void refresh(), LIVE_POLL_MS);
-    return () => clearInterval(id);
-  }, [hasLive, refresh]);
+  useVisiblePolling(refresh, hasLive, LIVE_POLL_MS);
 
   const setAgentState = (id: string, next: AgentState) =>
     setMeetings((ms) => ms.map((m) => (m.id === id ? { ...m, agent_state: next } : m)));
@@ -43,13 +43,12 @@ export function MeetingsView({ initial }: { initial: MeetingRow[] }) {
     <div className="h-screen overflow-y-auto scrollbar-thin bg-background">
       <div className="mx-auto max-w-4xl px-6 py-8">
         <div className="flex items-center gap-3 mb-1">
-          <Link
-            href="/"
+          <BackToChatLink
             className="h-8 w-8 grid place-items-center rounded-lg text-muted-foreground hover:bg-sidebar-accent hover:text-foreground transition"
             aria-label="チャットに戻る"
           >
             <ArrowLeft className="w-4 h-4" />
-          </Link>
+          </BackToChatLink>
           <h1 className="text-[18px] font-semibold text-foreground flex items-center gap-2">
             <Video className="w-[18px] h-[18px]" aria-hidden />
             会議
