@@ -3,7 +3,7 @@
 import { useEffect, useState, useTransition } from "react";
 import { NavigationLink as Link } from "./navigation-link";
 import { useRouter, usePathname } from "next/navigation";
-import { BookOpen, Loader2, LogOut, Mic, Plus, Settings, Trash2, Video } from "lucide-react";
+import { Loader2, LogOut, Mic, Plus, Settings, Trash2, Video } from "lucide-react";
 import type { ThreadSummary } from "@/types";
 import { cn } from "@/lib/cn";
 import { SettingsModal, type Tab as SettingsTab } from "./settings-modal";
@@ -230,15 +230,6 @@ export function ThreadSidebar({ initial, userEmail }: { initial: ThreadSummary[]
             >
               <Video className="w-3.5 h-3.5" aria-hidden />
             </Link>
-            <button
-              type="button"
-              onClick={() => openSettings("access")}
-              className="h-6 w-6 grid place-items-center rounded-md hover:bg-sidebar-accent hover:text-foreground transition"
-              title="アクセス資料"
-              aria-label="アクセス資料"
-            >
-              <BookOpen className="w-3.5 h-3.5" aria-hidden />
-            </button>
             <button
               type="button"
               onClick={() => openSettings("profile")}
