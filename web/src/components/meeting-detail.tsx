@@ -21,6 +21,7 @@ import { Markdown } from "./markdown";
 import { parseSSE } from "@/lib/sse";
 import { STATUS_LABELS, formatClock, formatDuration, formatElapsed } from "@/lib/meetings";
 import { cn } from "@/lib/cn";
+import { citedSources } from "@/lib/cited-sources";
 import { useVisiblePolling } from "@/lib/use-visible-polling";
 import type {
   AgentState,
@@ -545,9 +546,9 @@ function QaTab({
                 回答を作成しています…
               </p>
             )}
-            {m.citations && m.citations.length > 0 && (
+            {citedSources(m.content, m.citations ?? []).length > 0 && (
               <div className="mt-3 flex flex-wrap gap-1.5">
-                {m.citations.map((c) => (
+                {citedSources(m.content, m.citations ?? []).map((c) => (
                   <CitationChip key={c.n} citation={c} />
                 ))}
               </div>

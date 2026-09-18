@@ -185,6 +185,30 @@ in the transcript as captions.
 A separate `meeting_questions` table was the third option: simpler to read, but
 it re-implements four things that already work.
 
+**Meeting Q&A evidence (2026-09-17):** Each turn loads the selected meeting's
+title, summary, scheduled/recorded timestamps, computed recorded duration,
+calendar invitees, speaker labels from all segments, and the transcript tail
+(16,000 characters). Calendar invitees are not confirmed attendees; people
+given access through sharing are excluded from the invitee evidence. Speaker
+labels do not cover silent attendees. Duration measures AI join → recorded end,
+not necessarily the entire meeting; missing timestamps remain unknown.
+
+`meeting_qa.plan_meeting_search` uses the configured mini model to choose whether
+external company evidence is needed. Meeting facts use only the selected record;
+missing meeting facts never justify searching other meetings. Mixed questions
+(e.g. whether a proposal follows company policy) get a company search query
+resolved from the meeting and recent Q&A. Explicit comparisons may retrieve other
+meetings. Retrieval keeps the caller's existing access scope. Failed or invalid
+routing skips retrieval and tells generation to disclose unavailable company
+evidence. This routing is model-based, with regression tests and synthetic live
+checks; it does not guarantee perfect intent classification.
+
+Meeting-specific system rules separate record facts from company evidence and
+forbid using other meetings to fill gaps. The Q&A source chips show only sources
+referenced by `[N]` in the answer, retaining original numbers across streaming
+and reload. Stored retrieval candidates are retained for the existing citation
+mapping; hiding a candidate chip does not validate the claim itself.
+
 ---
 
 ## 5. Who may see a meeting — decided 2026-09-07

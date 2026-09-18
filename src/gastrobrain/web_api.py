@@ -36,6 +36,7 @@ from gastrobrain.auth import AuthUser, require_user
 from gastrobrain.config import get_settings
 from gastrobrain.db import conn
 from gastrobrain.generate import HistoryTurn, UserPreferences
+from gastrobrain.meeting_qa import format_meeting_record
 
 _ALLOWED_DEPARTMENTS = {"consulting", "sales", "content", "dev", "backoffice", "other"}
 from gastrobrain.pipeline import (
@@ -1985,7 +1986,7 @@ def _prep_turn(
     """Verify thread ownership, resolve access scope, load the history window
     and prefs, and insert the user's turn — all in one transaction.
 
-    The fifth return value is the meeting transcript when the thread belongs to
+    The fifth return value is the meeting record when the thread belongs to
     a meeting, and None otherwise. Participation is re-checked here rather than
     only at thread creation: access can be revoked between the two.
 
@@ -2013,15 +2014,31 @@ def _prep_turn(
         if conv_row[0] is not None:
             _require_participant(cur, conv_row[0], user.email)
             cur.execute(
-                "SELECT title, summary FROM meetings WHERE id = %s",
+                "SELECT title, summary, scheduled_at, started_at, ended_at, status "
+                "FROM meetings WHERE id = %s",
                 (str(conv_row[0]),),
             )
-            m_title, m_summary = cur.fetchone()
+            m_title, m_summary, scheduled_at, started_at, ended_at, m_status = cur.fetchone()
+            cur.execute(
+                "SELECT email, is_organizer FROM meeting_participants "
+                "WHERE meeting_id = %s AND added_by IS NULL "
+                "ORDER BY is_organizer DESC, email",
+                (str(conv_row[0]),),
+            )
+            invitees = cur.fetchall()
+            # Read speakers from ALL segments, not just the retained transcript
+            # tail: an early speaker must not disappear from attendance answers.
+            cur.execute(
+                "SELECT DISTINCT speaker FROM meeting_segments "
+                "WHERE meeting_id = %s AND btrim(speaker) <> '' ORDER BY speaker",
+                (str(conv_row[0]),),
+            )
+            speakers = [r[0] for r in cur.fetchall()]
             transcript = _transcript_text(cur, conv_row[0], _TRANSCRIPT_PROMPT_CHARS)
-            meeting_context = (
-                f"以下は社内会議「{m_title}」の記録です。\n\n"
-                + (f"要約:\n{m_summary}\n\n" if m_summary else "")
-                + f"文字起こし:\n{transcript}"
+            meeting_context = format_meeting_record(
+                meeting_id=str(conv_row[0]), title=m_title, summary=m_summary,
+                scheduled_at=scheduled_at, started_at=started_at, ended_at=ended_at,
+                status=m_status, invitees=invitees, speakers=speakers, transcript=transcript,
             )
 
         # Access scope (gates which docs retrieval may surface). Resolved by

@@ -30,6 +30,7 @@ from gastrobrain.retrieve import (
     rerank_candidates,
     retrieve_candidates,
 )
+from gastrobrain.meeting_qa import plan_meeting_search
 from gastrobrain.rewrite import standalone_query
 
 log = logging.getLogger("gastrobrain.pipeline")
@@ -116,8 +117,8 @@ class PipelineInput:
     # searchable. Defaults to PUBLIC_ONLY (fail-closed).
     scope: AccessScope = PUBLIC_ONLY
     # Non-retrieved evidence prepended to the generation prompt — a meeting
-    # transcript when the thread belongs to a meeting. Already ACL-checked by the
-    # caller; retrieval never sees it.
+    # record when the thread belongs to a meeting. Already ACL-checked by the
+    # caller; the meeting router uses it to resolve external search subjects.
     extra_context: str | None = None
 
 
@@ -125,8 +126,8 @@ async def run_pipeline(inp: PipelineInput) -> AsyncIterator[PipelineEvent]:
     """Async generator that drives the full pipeline and emits structured events.
 
     Stages:
-      1. Optional Haiku rewrite (only when history is non-empty).
-      2. Hybrid retrieval (BM25 + dense + RRF).
+      1. Meeting-aware search routing, or a follow-up rewrite for ordinary chat.
+      2. Hybrid retrieval (BM25 + dense + RRF), when external evidence is needed.
       3. Rerank.
       4. Streaming generation.
 
@@ -135,19 +136,35 @@ async def run_pipeline(inp: PipelineInput) -> AsyncIterator[PipelineEvent]:
     t0 = time.perf_counter()
     stats = RetrievalStats()
 
-    # 1. Query rewrite (only when there's prior context)
-    retrieval_query = inp.question
-    if inp.history:
+    # 1. Meeting questions default to their own record. Only the external part
+    # of a mixed/company question enters corpus retrieval.
+    retrieval_query: str | None = inp.question
+    meeting_context = inp.extra_context
+    if meeting_context:
+        plan = await asyncio.to_thread(
+            plan_meeting_search, inp.question, inp.history, meeting_context
+        )
+        retrieval_query = plan.query
+        if plan.unavailable:
+            meeting_context += (
+                "\n\n検索状況: 社内資料の検索要否を判定できず、外部資料は検索していません。"
+                "会社情報が必要な部分は確認できない旨を回答に明示してください。"
+            )
+        if retrieval_query and retrieval_query != inp.question:
+            yield QueryRewritten(original=inp.question, rewritten=retrieval_query)
+    elif inp.history:
         rewritten = await asyncio.to_thread(standalone_query, inp.question, inp.history)
         if rewritten and rewritten != inp.question:
             retrieval_query = rewritten
             yield QueryRewritten(original=inp.question, rewritten=rewritten)
 
     # 2. Retrieval
-    yield RetrievalStarted()
-    candidates = await asyncio.to_thread(
-        retrieve_candidates, retrieval_query, stats, inp.scope
-    )
+    candidates = []
+    if retrieval_query:
+        yield RetrievalStarted()
+        candidates = await asyncio.to_thread(
+            retrieve_candidates, retrieval_query, stats, inp.scope
+        )
     yield RetrievalDone(n_candidates=len(candidates), stats=stats)
 
     # 3. Rerank (+ expand Slack hits to their full day-conversation)
@@ -170,7 +187,7 @@ async def run_pipeline(inp: PipelineInput) -> AsyncIterator[PipelineEvent]:
             for ev in answer_stream(
                 inp.question, chunks, inp.history,
                 surface=inp.surface, prefs=inp.prefs,
-                extra_context=inp.extra_context,
+                extra_context=meeting_context,
             ):
                 queue.put_nowait(ev)
         except Exception as e:  # noqa: BLE001
