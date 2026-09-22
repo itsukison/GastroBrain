@@ -128,6 +128,15 @@ export async function openMeetingAudio(): Promise<MeetingAudio> {
  * sitting in front of the page — it greets, and it closes every turn by asking
  * "他にありますか？". Both are wrong in a 商談, so this cancels them explicitly
  * rather than relying on the model to infer the change of setting.
+ *
+ * The second block is load-bearing and not obvious. The base prompt orders the
+ * model to route anything factual through `ask_gastrobrain`
+ * (`voice-prompt.ts`: 「過去の経緯に関する質問は、必ず ask_gastrobrain を呼ぶ」,
+ * 「ツールを呼ばずに事実を述べない」). Taken literally that captures
+ * 「これまで何を話した？」 too — so the agent searched the corpus and read back
+ * *other* meetings, while the meeting it was sitting in was already in its own
+ * conversation context. Nothing else cancels that instruction, so this does,
+ * explicitly.
  */
 export const MEETING_INSTRUCTIONS = `
 
@@ -142,7 +151,42 @@ export const MEETING_INSTRUCTIONS = `
 - 一度呼ばれたあとの追加質問には、名前で呼ばれ直さなくてもそのまま答える。
   ただし答え終わったら黙る。
 - 参加者は全員社内メンバー。社内の呼び名はそのまま使ってよい。
-  ただし未確定の数値は必ず「未確定」と添える。`;
+  ただし未確定の数値は必ず「未確定」と添える。
+
+# いま参加しているこの会議についての質問
+- この節は上記の「必ず ask_gastrobrain を呼ぶ」「ツールを呼ばずに事実を述べない」
+  および代名詞を検索語に展開する規則の例外であり、この会議の発言について優先する。
+- あなたが接続してから実際に聞いた発言は、この会話の文脈を根拠にできる。
+  参加前・再接続前の発言も聞いていたと主張しない。
+- 「これまでの話」「さっきの◯◯の件」「誰がなんと言ったか」「ここまでをまとめて」
+  のように、この会議での発言そのものを尋ねられたときは、
+  聞いた会話からそのまま答える。ask_gastrobrain は呼ばない。
+  別の会議の資料で、この会議の発言の空白を埋めてはいけない。
+- 聞き取れていない部分・覚えていない部分は「そこは聞き取れていません」と述べる。
+  推測で埋めない。混合音声なので、話者の名前が確認できなければ断定しない。
+- 社内資料の事実（過去の案件・数値・手順）と、この会議での発言は別物として扱う。
+  両方必要なときは、会議の発言は自分の記憶から、資料の事実は ask_gastrobrain から取り、
+  どちらを根拠にしているか分かるように述べる。`;
+
+/** Canonical UUID, any version. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The meeting this participant is attached to, from `?meeting_id=`.
+ *
+ * Set by Meetron's session supervisor, which registers the meeting with the API
+ * before opening this tab. It makes the voice thread a *meeting* thread
+ * (`conversations.meeting_id`), which is what puts the stored transcript and the
+ * meeting-scoped retrieval rules in front of every `ask_gastrobrain` call.
+ *
+ * Validated as a UUID rather than passed through: it goes into an API request
+ * body, and a malformed value should read as "no meeting" rather than as a
+ * request the backend has to reject.
+ */
+export function meetingIdFromParams(params: URLSearchParams | null): string | null {
+  const raw = params?.get("meeting_id")?.trim() ?? "";
+  return UUID.test(raw) ? raw.toLowerCase() : null;
+}
 
 /** What the gate is doing right now, for the on-screen indicator. */
 export type GateState = "listening" | "answering";
@@ -458,4 +502,12 @@ export function attachMeetingGate(
     },
     close: clearIdle,
   };
+}
+
+/** Only a successfully bound thread can retrieve the selected meeting record. */
+export function meetingInstructions(hasRecord: boolean): string {
+  return MEETING_INSTRUCTIONS + (hasRecord ? `
+- このスレッドにはこの会議の記録が紐づいている。再接続前など、聞いた文脈にない
+  発言を確認する必要がある場合だけ ask_gastrobrain で「この会議の記録」を指定して確認できる。
+  記録にもなければ不明と述べ、他の会議で補わない。` : "");
 }

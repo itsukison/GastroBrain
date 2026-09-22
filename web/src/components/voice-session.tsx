@@ -26,12 +26,14 @@ import {
 } from "@openai/agents-realtime";
 import type { Citation, VoiceAnswer, VoiceSessionInit } from "@/types";
 import { cn } from "@/lib/cn";
+import { createVoiceThread } from "@/lib/voice-thread";
 import {
   attachMeetingGate,
   isMeetingMode,
+  meetingIdFromParams,
   openMeetingAudio,
   usesDefaultAudio,
-  MEETING_INSTRUCTIONS,
+  meetingInstructions,
   type AgentState,
   type GateState,
   type MeetingControl,
@@ -228,6 +230,11 @@ export function VoiceSession() {
   const meeting = isMeetingMode(params);
   // Testing aid: meeting behaviour on the laptop microphone. See lib/meeting-mode.ts.
   const defaultAudio = meeting && usesDefaultAudio(params);
+  // The meeting row this participant belongs to, registered by Meetron's
+  // session supervisor before this tab was opened. Null when the agent was
+  // started by hand, which still works — it just answers without the record.
+  const meetingId = meeting ? meetingIdFromParams(params) : null;
+  const [boundMeetingId, setBoundMeetingId] = useState<string | null>(null);
   const [gate, setGate] = useState<GateState>("listening");
   // Whether the agent will answer without being named. Sticky — see
   // lib/meeting-mode.ts; the one-shot gate this replaced went deaf after the
@@ -344,13 +351,23 @@ export function VoiceSession() {
       // One conversation row per voice session, minted lazily so merely
       // opening this page doesn't litter the sidebar. Voice turns land in the
       // same `messages` table as chat, so the thread is readable afterwards.
-      const threadResp = await fetch("/api/threads", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: "{}",
-      });
-      if (!threadResp.ok) throw new Error(`スレッドの作成に失敗しました (HTTP ${threadResp.status})`);
-      const thread = (await threadResp.json()) as { id: string };
+      //
+      // With a meeting id the thread belongs to the meeting, which is what puts
+      // that meeting's transcript — and the rules that stop other meetings
+      // being used to fill its gaps — in front of every ask_gastrobrain call.
+      // The backend 404s if this login is not on the participant list; that has
+      // to degrade to an ordinary thread rather than keep the agent out of the
+      // meeting entirely.
+      const thread = await createVoiceThread(meetingId);
+      const hasMeetingRecord = Boolean(thread.meetingId);
+      if (meetingId && !hasMeetingRecord) {
+        console.warn(`meeting thread refused (HTTP ${thread.fallbackStatus}); falling back`);
+        setError(
+          "この会議のスレッドを作成できませんでした（会議の参加者に登録されていない可能性があります）。" +
+            "会議の記録を参照せずに応答します。",
+        );
+      }
+      setBoundMeetingId(thread.meetingId);
       conversationRef.current = thread.id;
       setConversationId(thread.id);
 
@@ -368,7 +385,11 @@ export function VoiceSession() {
         description:
           "社内資料（NotePM・Slack・Google Drive・Chatwork）に基づく回答を取得する。" +
           "会社・業務・クライアント・数値・過去の経緯に関する質問には必ずこれを使う。" +
-          "返ってきた文章はそのまま読み上げること。",
+          "返ってきた文章はそのまま読み上げること。" +
+          (meeting
+            ? "この会議で聞いた発言は会話の文脈から答える。会議についての専用指示を優先する。" +
+              (hasMeetingRecord ? "聞いていない発言は、この会議に紐づく記録を確認できる。" : "他の会議の資料で発言の空白を埋めない。")
+            : ""),
         parameters: {
           type: "object",
           properties: {
@@ -427,7 +448,7 @@ export function VoiceSession() {
 
       const agent = new RealtimeAgent({
         name: "Gastrobrain",
-        instructions: meeting ? init.instructions + MEETING_INSTRUCTIONS : init.instructions,
+        instructions: meeting ? init.instructions + meetingInstructions(hasMeetingRecord) : init.instructions,
         tools: [askGastrobrain],
       });
 
@@ -476,7 +497,18 @@ export function VoiceSession() {
         });
       }
 
-      session.on("history_updated", (history) => setLines(toLines(history)));
+      let lastUserItemId: string | undefined;
+      session.on("history_updated", (history) => {
+        setLines(toLines(history));
+        const userItem = [...history].reverse().find((item) => item.type === "message" && item.role === "user");
+        if (userItem && userItem.itemId !== lastUserItemId) {
+          lastUserItemId = userItem.itemId;
+          // Clear old sources on a new user turn, including room-only recall.
+          // Do not clear on response.created: tool-result speech is a second
+          // response in the SAME turn and still needs its freshly set sources.
+          setCitations([]);
+        }
+      });
       session.on("agent_tool_start", () => setSearching(true));
       session.on("agent_tool_end", () => setSearching(false));
       session.on("error", (e) => {
@@ -504,7 +536,7 @@ export function VoiceSession() {
       setError(friendlyError(detail));
       setStatus("error");
     }
-  }, [meeting, defaultAudio]);
+  }, [meeting, defaultAudio, meetingId]);
 
   // Nobody is looking at this tab in a meeting — Meetron opens it in the
   // dedicated Chrome and there is no one to press 「会話を始める」.
@@ -524,11 +556,16 @@ export function VoiceSession() {
     // Meetron's launcher already reads that one and "asleep" is orthogonal to
     // "connecting"/"error" — the agent can be asleep only once it is live.
     root.dataset.meetingAgentState = agentState;
+    // Which meeting this tab thinks it is in. The supervisor reloads this tab
+    // when the session dies (the 55-minute cap), so it needs a way to confirm
+    // the tab that came back is the same meeting, not a stale one.
+    if (boundMeetingId) root.dataset.meetingId = boundMeetingId;
     return () => {
       delete root.dataset.meetingStatus;
       delete root.dataset.meetingAgentState;
+      delete root.dataset.meetingId;
     };
-  }, [meeting, status, gate, agentState]);
+  }, [meeting, status, gate, agentState, boundMeetingId]);
 
   // Control surface for Meetron, which drives this tab over CDP. The Meet chat
   // reader lives in the *other* tab (the meeting), so a command typed in chat

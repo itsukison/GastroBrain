@@ -6,7 +6,10 @@ import {
   attachMeetingGate,
   isQuietCommand,
   looksAddressed,
+  meetingIdFromParams,
   parseChatCommand,
+  MEETING_INSTRUCTIONS,
+  meetingInstructions,
 } from "./meeting-mode.ts";
 
 type Handler = (event: unknown) => void;
@@ -299,5 +302,50 @@ describe("gate.command", () => {
     assert.equal(s.answers(), 1, "waking is not itself a question");
 
     gate.close();
+  });
+});
+
+describe("meetingIdFromParams", () => {
+  const id = (query: string) => meetingIdFromParams(new URLSearchParams(query));
+
+  it("reads the meeting the supervisor attached this tab to", () => {
+    assert.equal(
+      id("mode=meeting&meeting_id=7C9E6679-7425-40DE-944B-E07FC1F90AE7"),
+      "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+      "normalised to lower case, because it is compared against API output",
+    );
+  });
+
+  it("treats anything that is not a uuid as no meeting", () => {
+    // It goes straight into a request body, so a malformed value has to read as
+    // "started by hand" rather than as a request the backend must reject.
+    assert.equal(id("mode=meeting"), null);
+    assert.equal(id("mode=meeting&meeting_id="), null);
+    assert.equal(id("mode=meeting&meeting_id=live"), null);
+    assert.equal(id("mode=meeting&meeting_id=7c9e6679-7425-40de-944b"), null);
+    assert.equal(meetingIdFromParams(null), null);
+  });
+});
+
+describe("MEETING_INSTRUCTIONS", () => {
+  // Prompt text cannot be unit-tested for behaviour, but the one rule that
+  // fixed a real defect can be pinned so it is not lost in a future edit: the
+  // base prompt orders every factual question through ask_gastrobrain, and
+  // questions about the meeting in progress are the documented exception.
+  it("keeps this-meeting questions away from the corpus tool", () => {
+    assert.match(MEETING_INSTRUCTIONS, /ask_gastrobrain は呼ばない/);
+    assert.match(MEETING_INSTRUCTIONS, /この会議/);
+  });
+});
+
+describe("meeting instructions after reconnect", () => {
+  it("makes tool precedence explicit and does not invent complete audio memory", () => {
+    assert.match(MEETING_INSTRUCTIONS, /規則の例外/);
+    assert.match(MEETING_INSTRUCTIONS, /再接続前の発言も聞いていたと主張しない/);
+    assert.match(MEETING_INSTRUCTIONS, /話者の名前が確認できなければ断定しない/);
+  });
+  it("allows record lookup only for a successfully bound meeting thread", () => {
+    assert.match(meetingInstructions(true), /このスレッドにはこの会議の記録が紐づいている/);
+    assert.doesNotMatch(meetingInstructions(false), /このスレッドにはこの会議の記録が紐づいている/);
   });
 });
