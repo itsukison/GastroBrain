@@ -6,6 +6,7 @@ import { BackToChatLink } from "./navigation-provider";
 import { ArrowLeft, Radio, Users, Video } from "lucide-react";
 
 import { AgentStateToggle } from "./agent-state-toggle";
+import { RecallStart } from "./recall-start";
 import { STATUS_LABELS, formatClock, formatDuration, groupMeetings } from "@/lib/meetings";
 import { cn } from "@/lib/cn";
 import { useVisiblePolling } from "@/lib/use-visible-polling";
@@ -58,6 +59,7 @@ export function MeetingsView({ initial }: { initial: MeetingRow[] }) {
           商談AIが参加した会議の記録です。表示されるのは自分が招待された会議のみです。
         </p>
 
+        <RecallStart onChange={() => void refresh(new AbortController().signal)} />
         <div className="ml-11 space-y-6">
           {groups.length === 0 && (
             <p className="text-[13px] text-muted-foreground py-12 text-center">

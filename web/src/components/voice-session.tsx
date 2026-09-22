@@ -26,6 +26,9 @@ import {
 } from "@openai/agents-realtime";
 import type { Citation, VoiceAnswer, VoiceSessionInit } from "@/types";
 import { cn } from "@/lib/cn";
+import type { RecallBinding } from "./recall-voice";
+import { openRecallAudio } from "@/lib/recall-audio";
+import { useRecallControl } from "@/lib/use-recall-control";
 import { createVoiceThread } from "@/lib/voice-thread";
 import {
   attachMeetingGate,
@@ -222,18 +225,18 @@ function SourceList({
   );
 }
 
-export function VoiceSession() {
+export function VoiceSession({ recall }: { recall?: RecallBinding } = {}) {
   // Meeting mode: bound to Meetron's loopback devices, silent until addressed
   // by name. Opt-in via `?mode=meeting` so the page is unchanged for everyone
   // else. See lib/meeting-mode.ts.
   const params = useSearchParams();
-  const meeting = isMeetingMode(params);
+  const meeting = Boolean(recall) || isMeetingMode(params);
   // Testing aid: meeting behaviour on the laptop microphone. See lib/meeting-mode.ts.
   const defaultAudio = meeting && usesDefaultAudio(params);
   // The meeting row this participant belongs to, registered by Meetron's
   // session supervisor before this tab was opened. Null when the agent was
   // started by hand, which still works — it just answers without the record.
-  const meetingId = meeting ? meetingIdFromParams(params) : null;
+  const meetingId = recall?.meetingId ?? (meeting ? meetingIdFromParams(params) : null);
   const [boundMeetingId, setBoundMeetingId] = useState<string | null>(null);
   const [gate, setGate] = useState<GateState>("listening");
   // Whether the agent will answer without being named. Sticky — see
@@ -271,21 +274,40 @@ export function VoiceSession() {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const pinnedRef = useRef(true);
 
+  const audioRef = useRef<Awaited<ReturnType<typeof openRecallAudio>> | null>(null);
+  const generation = useRef(0);
+  const releaseAudio = useCallback(() => {
+    audioRef.current?.mediaStream.getTracks().forEach(t => t.stop());
+    if (audioRef.current) {
+      audioRef.current.audioElement.pause();
+      audioRef.current.audioElement.srcObject = null;
+      audioRef.current.audioElement.remove();
+    }
+    audioRef.current = null;
+  }, []);
+
   const stop = useCallback(() => {
+    generation.current += 1;
     gateRef.current?.close();
     gateRef.current = null;
-    sessionRef.current?.close();
+    const closing = sessionRef.current;
     sessionRef.current = null;
+    closing?.close();
+    releaseAudio();
     setSearching(false);
     setStatus((s) => (s === "error" ? s : "ended"));
-  }, []);
+  }, [releaseAudio]);
 
   // Close the transport if the user navigates away mid-conversation —
   // otherwise the session keeps billing until OpenAI times it out.
   useEffect(
     () => () => {
+      generation.current += 1;
       gateRef.current?.close();
-      sessionRef.current?.close();
+      const closing = sessionRef.current;
+      sessionRef.current = null;
+      closing?.close();
+      releaseAudio();
     },
     [],
   );
@@ -336,6 +358,7 @@ export function VoiceSession() {
   }, [lines, searching, citations, error]);
 
   const start = useCallback(async () => {
+    const attempt = ++generation.current;
     setStatus("connecting");
     setError(null);
     setLines([]);
@@ -358,7 +381,7 @@ export function VoiceSession() {
       // The backend 404s if this login is not on the participant list; that has
       // to degrade to an ordinary thread rather than keep the agent out of the
       // meeting entirely.
-      const thread = await createVoiceThread(meetingId);
+      const thread = recall ? { id: recall.conversationId, meetingId: recall.meetingId, fallbackStatus: null } : await createVoiceThread(meetingId);
       const hasMeetingRecord = Boolean(thread.meetingId);
       if (meetingId && !hasMeetingRecord) {
         console.warn(`meeting thread refused (HTTP ${thread.fallbackStatus}); falling back`);
@@ -371,12 +394,13 @@ export function VoiceSession() {
       conversationRef.current = thread.id;
       setConversationId(thread.id);
 
-      const initResp = await fetch("/api/voice/session", { method: "POST" });
+      const initResp = await fetch(recall ? "/api/recall/bot/session" : "/api/voice/session", { method: "POST", signal: AbortSignal.timeout(25_000) });
       if (!initResp.ok) {
         const body = (await initResp.json().catch(() => ({}))) as { error?: string };
         throw new Error(body.error ?? `音声セッションの初期化に失敗しました (HTTP ${initResp.status})`);
       }
       const init = (await initResp.json()) as VoiceSessionInit;
+      if (attempt !== generation.current) return;
 
       // The supervisor. Everything factual the agent says comes through here —
       // same retrieval + Sonnet pipeline, same ACL, as the web chat.
@@ -415,10 +439,10 @@ export function VoiceSession() {
           const cid = conversationRef.current;
           if (!cid) return "内部エラーが発生しました。チャットからお試しください。";
           try {
-            const resp = await fetch("/api/voice/ask", {
+            const resp = await fetch(recall ? "/api/recall/bot/ask" : "/api/voice/ask", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ conversation_id: cid, question, utterance }),
+              body: JSON.stringify(recall ? { question, utterance } : { conversation_id: cid, question, utterance }),
             });
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const data = (await resp.json()) as VoiceAnswer;
@@ -427,7 +451,7 @@ export function VoiceSession() {
             setPersistedTurns((n) => n + 1);
             // Name the thread once, after the first real answer, so voice
             // sessions are findable in the sidebar later.
-            if (!answeredRef.current) {
+            if (!recall && !answeredRef.current) {
               answeredRef.current = true;
               void fetch(`/api/threads/${cid}/title`, { method: "POST" }).catch(() => {});
             }
@@ -455,7 +479,13 @@ export function VoiceSession() {
       // In meeting mode the audio is Meetron's loopback pair, not the OS
       // default. Resolved before connecting so a missing device fails as a
       // clear error rather than a session that silently hears the wrong room.
-      const audio = meeting && !defaultAudio ? await openMeetingAudio() : null;
+      const audio = recall ? await openRecallAudio() : meeting && !defaultAudio ? await openMeetingAudio() : null;
+      if (attempt !== generation.current) {
+        audio?.mediaStream.getTracks().forEach(t => t.stop());
+        audio?.audioElement.remove();
+        return;
+      }
+      audioRef.current = audio;
 
       const session = new RealtimeSession(agent, {
         model: init.model,
@@ -497,6 +527,35 @@ export function VoiceSession() {
         });
       }
 
+      if (recall) {
+        session.transport.on("connection_change", (connection) => {
+          if (connection === "disconnected" && sessionRef.current === session) {
+            stop();
+            setStatus("error");
+          }
+        });
+      }
+      const spoken = new Set<string>();
+      session.on("transport_event", (event) => {
+        // audio_stopped is generation-done in this SDK, before playback ends.
+        if (!recall || event.type !== "output_audio_buffer.stopped") return;
+        for (const line of toLines(session.history)) {
+          if (line.role !== "assistant" || line.pending || spoken.has(line.id)) continue;
+          spoken.add(line.id);
+          // Same key across network retries; only enqueue after playback stops.
+          const body = JSON.stringify({ item_id: line.id, text: line.text, spoken_at: new Date().toISOString() });
+          const save = async () => {
+            for (let retry = 0; retry < 3; retry++) {
+              try {
+                const result = await fetch("/api/recall/bot/spoken", { method: "POST", headers: { "Content-Type": "application/json" }, body,
+                  signal: AbortSignal.timeout(8_000) });
+                if (result.ok || [401, 403].includes(result.status)) return;
+              } catch { /* bounded retry of this turn only */ }
+            }
+          };
+          void save();
+        }
+      });
       let lastUserItemId: string | undefined;
       session.on("history_updated", (history) => {
         setLines(toLines(history));
@@ -517,33 +576,47 @@ export function VoiceSession() {
         setError(friendlyError(detail));
         // A transport error before we're live means the session never started.
         // Once live, surface the message but don't tear down the conversation.
-        setStatus((s) => (s === "live" ? s : "error"));
+        if (recall) { stop(); setStatus("error"); }
+        else setStatus((s) => (s === "live" ? s : "error"));
       });
 
       // Store before connecting so a failed attempt is still closeable and
       // doesn't leak a half-open peer connection.
       sessionRef.current = session;
-      await session.connect({ apiKey: init.clientSecret, model: init.model });
+      let connectTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const connecting = session.connect({ apiKey: init.clientSecret, model: init.model });
+        if (recall) await Promise.race([connecting, new Promise<never>((_, reject) => {
+          connectTimer = setTimeout(() => reject(new Error("Voice connection timed out")), 25_000);
+        })]);
+        else await connecting;
+      } finally { clearTimeout(connectTimer); }
+      if (attempt !== generation.current) { session.close(); return; }
       setMuted(false);
       setStatus("live");
     } catch (e) {
+      if (attempt !== generation.current) return;
+      releaseAudio();
       const detail = describeError(e);
       console.error("voice session failed:", detail, e);
       gateRef.current?.close();
       gateRef.current = null;
-      sessionRef.current?.close();
+      const closing = sessionRef.current;
       sessionRef.current = null;
+      closing?.close();
       setError(friendlyError(detail));
       setStatus("error");
     }
-  }, [meeting, defaultAudio, meetingId]);
+  }, [meeting, defaultAudio, meetingId, recall, releaseAudio, stop]);
+
+  useRecallControl({ enabled: Boolean(recall), status, gate: gateRef, start, stop });
 
   // Nobody is looking at this tab in a meeting — Meetron opens it in the
   // dedicated Chrome and there is no one to press 「会話を始める」.
   useEffect(() => {
-    if (!meeting || status !== "idle") return;
+    if (recall || !meeting || status !== "idle") return;
     void start();
-  }, [meeting, status, start]);
+  }, [meeting, status, start, recall]);
 
   // Machine-readable state for Meetron, which drives this tab over CDP and has
   // to know whether the agent came up. An attribute rather than on-screen text:
@@ -593,6 +666,13 @@ export function VoiceSession() {
     session.mute(next);
     setMuted(next);
   }, [muted]);
+
+  if (recall) return (
+    <main className="grid h-dvh place-content-center text-center bg-slate-950 text-white">
+      <h1 className="text-6xl font-semibold">商談AI</h1>
+      <p className="mt-8 text-2xl text-slate-300">{status === "live" ? (gate === "answering" ? "応答中" : "会議に参加しています") : "接続準備中"}</p>
+    </main>
+  );
 
   const live = status === "live";
   const showSources = sourcesOpen && citations.length > 0;

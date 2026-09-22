@@ -66,4 +66,5 @@ ignore = ["E501"]
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+    "pgserver==0.1.4",
 ]

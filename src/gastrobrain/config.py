@@ -76,6 +76,16 @@ class Settings(BaseSettings):
     # closed (reads by the browser are unaffected). See docs/MEETINGS_WEB.md §6.1.
     meeting_agent_token: str = ""
 
+    # Disabled until migration, public routes, secrets and the worker are deployed.
+    recall_enabled: bool = False
+    recall_region: str = "ap-northeast-1"
+    recall_api_key: str = ""
+    recall_webhook_verification_secret: str = ""
+    public_api_base_url: str = ""
+    recall_web_url: str = ""
+    recall_worker_token: str = ""
+    recall_max_seconds: int = Field(default=7200, ge=600, le=14400)
+
     # MCP — comma-separated "label:token" pairs. Empty disables the /mcp route.
     gastrobrain_mcp_tokens: str = ""
     gastrobrain_mcp_enabled: bool = True

@@ -23,6 +23,7 @@ for s in LANGFUSE_PUBLIC_KEY LANGFUSE_SECRET_KEY GASTROBRAIN_MCP_TOKENS \
          GOOGLE_OAUTH_CLIENT_ID GOOGLE_OAUTH_CLIENT_SECRET \
          GASTROBRAIN_OAUTH_JWT_KEY GASTROBRAIN_OAUTH_STATE_KEY \
          MEETING_AGENT_TOKEN \
+         RECALL_API_KEY RECALL_WEBHOOK_VERIFICATION_SECRET RECALL_WORKER_TOKEN \
          OPENAI_API_KEY; do
   if gcloud secrets describe "$s" >/dev/null 2>&1; then
     OPTIONAL_SECRETS+=("$s=$s:latest")
@@ -43,6 +44,13 @@ SECRET_ARGS=(
 # Comma-join secret args
 SECRETS_CSV=$(IFS=,; echo "${SECRET_ARGS[*]}")
 
+RECALL_ENV=""
+if [[ -n "${RECALL_ENABLED:-}" ]]; then
+  : "${PUBLIC_API_BASE_URL:?Set the deployed HTTPS API origin}"
+  : "${RECALL_WEB_URL:?Set the deployed HTTPS web origin}"
+  RECALL_ENV=",RECALL_ENABLED=$RECALL_ENABLED,RECALL_REGION=${RECALL_REGION:-ap-northeast-1},PUBLIC_API_BASE_URL=$PUBLIC_API_BASE_URL,RECALL_WEB_URL=$RECALL_WEB_URL,RECALL_MAX_SECONDS=${RECALL_MAX_SECONDS:-7200}"
+fi
+
 echo "Deploying (this triggers Cloud Build — first run takes ~3 min)..."
 
 gcloud run deploy "$SERVICE" \
@@ -56,10 +64,10 @@ gcloud run deploy "$SERVICE" \
   --cpu 1 \
   --min-instances 1 \
   --max-instances 3 \
-  --timeout 60 \
+  --timeout 180 \
   --concurrency 8 \
-  --set-env-vars "ENV=prod,LANGFUSE_BASE_URL=https://jp.cloud.langfuse.com,LLM_PROVIDER=$LLM_PROVIDER,ANTHROPIC_MODEL=claude-sonnet-4-6,EMBEDDING_MODEL=embed-multilingual-v3.0,RERANK_MODEL=rerank-multilingual-v3.0,GASTROBRAIN_OAUTH_ISSUER=https://gastrobrain-rjp7bbdhta-an.a.run.app" \
-  --set-secrets "$SECRETS_CSV"
+  --update-env-vars "ENV=prod,LANGFUSE_BASE_URL=https://jp.cloud.langfuse.com,LLM_PROVIDER=$LLM_PROVIDER,ANTHROPIC_MODEL=claude-sonnet-4-6,EMBEDDING_MODEL=embed-multilingual-v3.0,RERANK_MODEL=rerank-multilingual-v3.0,GASTROBRAIN_OAUTH_ISSUER=https://gastrobrain-rjp7bbdhta-an.a.run.app$RECALL_ENV" \
+  --update-secrets "$SECRETS_CSV"
 
 URL=$(gcloud run services describe "$SERVICE" --region "$REGION" --format='value(status.url)')
 echo ""

@@ -1,5 +1,10 @@
 # MEETINGS_WEB.md — the 商談AI web surface
 
+> **Recall transport (2026-09-22):** the guest pilot now reuses the existing
+> voice agent. See [RECALL_PILOT.md](RECALL_PILOT.md) for scoped bot routes,
+> durable webhooks, start/stop controls and deployment. Existing Meetron APIs
+> below are preserved.
+
 > **Status:** spec. Written 2026-09-07; §4 and §5 settled and the migration
 > written the same day. Decisions taken since are marked **decided**.
 > **Audience:** the agent/engineer building the web half. This is your brief.

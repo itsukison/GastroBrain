@@ -2,6 +2,15 @@ import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
 export async function updateSession(request: NextRequest) {
+  // These handlers enforce a separate, expiring, single-run grant. Everything
+  // else (including the human Recall start/stop routes) still requires Supabase.
+  if (request.nextUrl.pathname === "/voice/recall" ||
+      /^\/api\/recall\/bot\/(exchange|context|session|ask|control|spoken)$/.test(request.nextUrl.pathname)) {
+    const botResponse = NextResponse.next({ request });
+    botResponse.headers.set("Cache-Control", "no-store");
+    botResponse.headers.set("Referrer-Policy", "no-referrer");
+    return botResponse;
+  }
   let response = NextResponse.next({ request });
 
   const supabase = createServerClient(

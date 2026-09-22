@@ -1,11 +1,11 @@
 import { backend } from "@/lib/api";
 import { requireUser } from "@/lib/auth-guard";
-import { transcriptionHint, voiceInstructions } from "@/lib/voice-prompt";
+import { mintVoiceSession } from "@/lib/voice-session-server";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-const VOICE_MODEL = process.env.OPENAI_VOICE_MODEL ?? "gpt-realtime-2.1-mini";
+
 
 /**
  * Mint an ephemeral Realtime client secret for the signed-in user.
@@ -42,33 +42,5 @@ export async function POST() {
     // fall through with an empty vocabulary
   }
 
-  const upstream = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      expires_after: { anchor: "created_at", seconds: 600 },
-      session: { type: "realtime", model: VOICE_MODEL },
-    }),
-    cache: "no-store",
-  });
-
-  if (!upstream.ok) {
-    const detail = await upstream.text();
-    return Response.json(
-      { error: `client_secrets failed: HTTP ${upstream.status}`, detail: detail.slice(0, 500) },
-      { status: 502 },
-    );
-  }
-
-  const secret = (await upstream.json()) as { value: string; expires_at?: number };
-  return Response.json({
-    clientSecret: secret.value,
-    expiresAt: secret.expires_at ?? null,
-    model: VOICE_MODEL,
-    instructions: voiceInstructions(terms),
-    transcriptionHint: transcriptionHint(terms),
-  });
+  return mintVoiceSession(terms);
 }

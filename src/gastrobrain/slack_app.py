@@ -24,6 +24,7 @@ from gastrobrain.config import get_settings
 from gastrobrain.db import conn
 from gastrobrain.oauth import router as oauth_router
 from gastrobrain.pipeline import run_pipeline_for_slack
+from gastrobrain.recall_api import router as recall_router
 from gastrobrain.retrieve import RetrievalStats, RetrievedChunk
 from gastrobrain.slack_format import assign_source_numbers, split_to_section_blocks, to_slack_mrkdwn
 from gastrobrain.web_api import router as web_router
@@ -62,6 +63,7 @@ async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(lifespan=_lifespan)
 app.include_router(web_router)
 app.include_router(oauth_router)
+app.include_router(recall_router)
 
 
 class _MCPSlashFixMiddleware:
@@ -93,6 +95,9 @@ async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSON
     """Log the traceback to Cloud Run logs and surface the exception class +
     message in the response body. Safe because this is an internal-only API
     (Slack-workspace-gated)."""
+    if request.url.path.startswith("/v1/recall/"):
+        log.error("Recall request failed: %s", type(exc).__name__)
+        return JSONResponse(status_code=500, content={"detail": "Recall request failed"})
     log.exception("unhandled exception on %s %s", request.method, request.url.path)
     return JSONResponse(
         status_code=500,
