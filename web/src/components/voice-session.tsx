@@ -27,8 +27,11 @@ import {
 import type { Citation, VoiceAnswer, VoiceSessionInit } from "@/types";
 import { cn } from "@/lib/cn";
 import type { RecallBinding } from "./recall-voice";
+import { createSpokenRecorder } from "@/lib/recall-spoken";
 import { openRecallAudio } from "@/lib/recall-audio";
 import { useRecallControl } from "@/lib/use-recall-control";
+import { RecallDisplay } from "./recall-display";
+import { createRecallAnswers, type RecallAnswerView, type RecallAvailability } from "@/lib/recall-display";
 import { createVoiceThread } from "@/lib/voice-thread";
 import {
   attachMeetingGate,
@@ -245,6 +248,10 @@ export function VoiceSession({ recall }: { recall?: RecallBinding } = {}) {
   const [agentState, setAgentState] = useState<AgentState>("asleep");
 
   const [status, setStatus] = useState<Status>("idle");
+  const [recallAvailability, setRecallAvailability] = useState<RecallAvailability>("connecting");
+  const [recallAnswer, setRecallAnswer] = useState<RecallAnswerView>({ answer: null, failed: false });
+  const [recallAnswers] = useState(() => createRecallAnswers(setRecallAnswer));
+  const [recallPlaying, setRecallPlaying] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lines, setLines] = useState<Line[]>([]);
   const [citations, setCitations] = useState<Citation[]>([]);
@@ -288,6 +295,8 @@ export function VoiceSession({ recall }: { recall?: RecallBinding } = {}) {
 
   const stop = useCallback(() => {
     generation.current += 1;
+    recallAnswers.reset();
+    setRecallPlaying(false);
     gateRef.current?.close();
     gateRef.current = null;
     const closing = sessionRef.current;
@@ -296,13 +305,14 @@ export function VoiceSession({ recall }: { recall?: RecallBinding } = {}) {
     releaseAudio();
     setSearching(false);
     setStatus((s) => (s === "error" ? s : "ended"));
-  }, [releaseAudio]);
+  }, [releaseAudio, recallAnswers]);
 
   // Close the transport if the user navigates away mid-conversation —
   // otherwise the session keeps billing until OpenAI times it out.
   useEffect(
     () => () => {
       generation.current += 1;
+      recallAnswers.reset();
       gateRef.current?.close();
       const closing = sessionRef.current;
       sessionRef.current = null;
@@ -359,6 +369,11 @@ export function VoiceSession({ recall }: { recall?: RecallBinding } = {}) {
 
   const start = useCallback(async () => {
     const attempt = ++generation.current;
+    recallAnswers.reset();
+    setRecallPlaying(false);
+    setAgentState("asleep");
+    setGate("listening");
+    setSearching(false);
     setStatus("connecting");
     setError(null);
     setLines([]);
@@ -435,6 +450,8 @@ export function VoiceSession({ recall }: { recall?: RecallBinding } = {}) {
         },
         strict: true,
         execute: async (input) => {
+          if (attempt !== generation.current) return "この音声セッションは終了しました。";
+          const displayTicket = recall ? recallAnswers.lookup() : null;
           const { question, utterance } = input as { question: string; utterance?: string };
           const cid = conversationRef.current;
           if (!cid) return "内部エラーが発生しました。チャットからお試しください。";
@@ -446,6 +463,8 @@ export function VoiceSession({ recall }: { recall?: RecallBinding } = {}) {
             });
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const data = (await resp.json()) as VoiceAnswer;
+            if (attempt !== generation.current) return data.answer;
+            if (displayTicket) recallAnswers.finish(displayTicket, data);
             setCitations(data.citations ?? []);
             setError(null);
             setPersistedTurns((n) => n + 1);
@@ -457,6 +476,8 @@ export function VoiceSession({ recall }: { recall?: RecallBinding } = {}) {
             }
             return data.answer;
           } catch (e) {
+            if (attempt !== generation.current) return "資料の検索を終了しました。";
+            if (displayTicket) recallAnswers.finish(displayTicket, null);
             // Surface it on screen too, not just aloud. A spoken-only apology
             // is indistinguishable from "the corpus had nothing", which is how
             // an undeployed /v1/voice/ask went unnoticed for two days — every
@@ -522,8 +543,11 @@ export function VoiceSession({ recall }: { recall?: RecallBinding } = {}) {
 
       if (meeting) {
         gateRef.current = attachMeetingGate(session, {
-          onState: setAgentState,
-          onActivity: setGate,
+          onState: state => { if (attempt === generation.current) setAgentState(state); },
+          onActivity: activity => { if (attempt === generation.current) setGate(activity); },
+          onTurn: recall ? () => {
+            if (attempt === generation.current) recallAnswers.begin();
+          } : undefined,
         });
       }
 
@@ -535,29 +559,28 @@ export function VoiceSession({ recall }: { recall?: RecallBinding } = {}) {
           }
         });
       }
-      const spoken = new Set<string>();
+      const recordSpoken = createSpokenRecorder((turn) => {
+        const body = JSON.stringify(turn);
+        const save = async () => {
+          for (let retry = 0; retry < 3; retry++) {
+            try {
+              const result = await fetch("/api/recall/bot/spoken", { method: "POST", headers: { "Content-Type": "application/json" }, body,
+                signal: AbortSignal.timeout(8_000) });
+              if (result.ok || [401, 403, 422].includes(result.status)) return;
+            } catch { /* bounded retry with the same response ID and timestamps */ }
+          }
+        };
+        void save();
+      });
       session.on("transport_event", (event) => {
-        // audio_stopped is generation-done in this SDK, before playback ends.
-        if (!recall || event.type !== "output_audio_buffer.stopped") return;
-        for (const line of toLines(session.history)) {
-          if (line.role !== "assistant" || line.pending || spoken.has(line.id)) continue;
-          spoken.add(line.id);
-          // Same key across network retries; only enqueue after playback stops.
-          const body = JSON.stringify({ item_id: line.id, text: line.text, spoken_at: new Date().toISOString() });
-          const save = async () => {
-            for (let retry = 0; retry < 3; retry++) {
-              try {
-                const result = await fetch("/api/recall/bot/spoken", { method: "POST", headers: { "Content-Type": "application/json" }, body,
-                  signal: AbortSignal.timeout(8_000) });
-                if (result.ok || [401, 403].includes(result.status)) return;
-              } catch { /* bounded retry of this turn only */ }
-            }
-          };
-          void save();
-        }
+        if (attempt !== generation.current || !recall) return;
+        if (event.type === "output_audio_buffer.started") setRecallPlaying(true);
+        if (event.type === "output_audio_buffer.stopped" || event.type === "output_audio_buffer.cleared") setRecallPlaying(false);
+        recordSpoken(event);
       });
       let lastUserItemId: string | undefined;
       session.on("history_updated", (history) => {
+        if (attempt !== generation.current) return;
         setLines(toLines(history));
         const userItem = [...history].reverse().find((item) => item.type === "message" && item.role === "user");
         if (userItem && userItem.itemId !== lastUserItemId) {
@@ -568,9 +591,10 @@ export function VoiceSession({ recall }: { recall?: RecallBinding } = {}) {
           setCitations([]);
         }
       });
-      session.on("agent_tool_start", () => setSearching(true));
-      session.on("agent_tool_end", () => setSearching(false));
+      session.on("agent_tool_start", () => { if (attempt === generation.current) setSearching(true); });
+      session.on("agent_tool_end", () => { if (attempt === generation.current) setSearching(false); });
       session.on("error", (e) => {
+        if (attempt !== generation.current) return;
         const detail = describeError(e);
         console.error("realtime session error:", detail, e);
         setError(friendlyError(detail));
@@ -607,9 +631,9 @@ export function VoiceSession({ recall }: { recall?: RecallBinding } = {}) {
       setError(friendlyError(detail));
       setStatus("error");
     }
-  }, [meeting, defaultAudio, meetingId, recall, releaseAudio, stop]);
+  }, [meeting, defaultAudio, meetingId, recall, releaseAudio, stop, recallAnswers]);
 
-  useRecallControl({ enabled: Boolean(recall), status, gate: gateRef, start, stop });
+  useRecallControl({ enabled: Boolean(recall), status, gate: gateRef, start, stop, onAvailability: setRecallAvailability });
 
   // Nobody is looking at this tab in a meeting — Meetron opens it in the
   // dedicated Chrome and there is no one to press 「会話を始める」.
@@ -667,12 +691,12 @@ export function VoiceSession({ recall }: { recall?: RecallBinding } = {}) {
     setMuted(next);
   }, [muted]);
 
-  if (recall) return (
-    <main className="grid h-dvh place-content-center text-center bg-slate-950 text-white">
-      <h1 className="text-6xl font-semibold">商談AI</h1>
-      <p className="mt-8 text-2xl text-slate-300">{status === "live" ? (gate === "answering" ? "応答中" : "会議に参加しています") : "接続準備中"}</p>
-    </main>
-  );
+  if (recall) return <RecallDisplay
+    availability={recallAvailability === "ended" || recallAvailability === "failed"
+      ? recallAvailability : status === "live" ? "ready"
+      : status === "error" || status === "ended" ? "reconnecting" : recallAvailability === "ready" ? "connecting" : recallAvailability}
+    agentState={agentState} searching={searching} answering={gate === "answering" || recallPlaying} answerView={recallAnswer}
+  />;
 
   const live = status === "live";
   const showSources = sourcesOpen && citations.length > 0;

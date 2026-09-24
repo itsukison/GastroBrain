@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { VoiceSession } from "./voice-session";
+import { RecallDisplay } from "./recall-display";
 
 export type RecallBinding = { meetingId: string; conversationId: string };
 export function RecallVoice() {
@@ -27,6 +28,5 @@ export function RecallVoice() {
     return () => { disposed = true; };
   }, []);
   if (binding) return <VoiceSession recall={binding} />;
-  return <main className="grid h-dvh place-content-center text-center"><h1 className="text-5xl">商談AI</h1>
-    <p className="mt-6">{failed ? "接続できませんでした" : "接続準備中"}</p></main>;
+  return <RecallDisplay availability={failed ? "failed" : "connecting"} />;
 }

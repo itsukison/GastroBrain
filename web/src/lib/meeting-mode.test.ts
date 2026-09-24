@@ -64,6 +64,27 @@ function fakeSession() {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+it("notifies the display only for accepted spoken or typed questions", () => {
+  const s = fakeSession();
+  let turns = 0;
+  const gate = attachMeetingGate(s.session, { onTurn: () => { turns++; } });
+  try {
+    s.said("来週にしましょう");
+    gate.command("商談AI 起きて");
+    assert.equal(turns, 0);
+    s.said("楽天の上限は？");
+    assert.equal(turns, 1);
+    s.said("それでは次の議題です");
+    s.said("商談AI、Amazonは？"); // Busy: preserve the current card.
+    assert.equal(turns, 1);
+    s.finished();
+    gate.command("商談AI Amazonの上限は？");
+    assert.equal(turns, 2);
+    gate.command("商談AI 静かに");
+    assert.equal(turns, 2);
+  } finally { gate.close(); }
+});
+
 describe("looksAddressed", () => {
   it("accepts question-marked and か-family endings", () => {
     assert.equal(looksAddressed("じゃあAmazonは？"), true);

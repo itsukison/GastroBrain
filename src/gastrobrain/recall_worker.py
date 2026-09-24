@@ -14,6 +14,7 @@ from psycopg.rows import dict_row
 
 from gastrobrain.db import conn
 from gastrobrain.recall_client import RecallError, caption_key
+from gastrobrain.recall_transcript import insert_source, reconcile_speech, replace_live
 
 log = logging.getLogger(__name__)
 
@@ -31,34 +32,33 @@ def timestamp(value):
     return result
 
 
-def insert_caption(cur, run, key, speaker, text, spoken_at):
-    if not text.strip():
+def import_segment(cur, run, transcript, segment, *, final_index=None):
+    # A completed download supersedes live events, including late deliveries.
+    if final_index is None and transcript["imported_at"]:
         return
-    cur.execute("INSERT INTO recall_captions(run_id,source_key) VALUES (%s,%s) "
-                "ON CONFLICT DO NOTHING RETURNING source_key", (run["id"], key))
-    if not cur.fetchone():
-        return
-    cur.execute("UPDATE recall_runs SET next_seq=next_seq+1 WHERE id=%s RETURNING next_seq", (run["id"],))
-    seq = cur.fetchone()["next_seq"]
-    cur.execute("INSERT INTO meeting_segments(meeting_id,seq,speaker,text,spoken_at) VALUES (%s,%s,%s,%s,%s)",
-                (run["meeting_id"], seq, speaker, text, spoken_at))
-
-
-def import_segment(cur, run, transcript, segment):
     words = segment.get("words") or []
     if not words:
         return
-    speaker = (segment.get("participant") or {}).get("name") or "参加者"
-    # Recall's own participant output is represented by the browser's completed
-    # audio turns. Captions can split/rephrase those turns and cannot dedupe them.
-    # Reserve this display name for the pilot bot.
-    if speaker == "商談AI":
-        return
-    start = words[0].get("start_timestamp") or {}
-    spoken_at = (timestamp(start["absolute"]) if start.get("absolute") else
-                 transcript["started_at"] + timedelta(seconds=float(start["relative"])))
-    insert_caption(cur, run, caption_key(str(transcript["id"]), segment), speaker,
-                   "".join(w.get("text", "") for w in words), spoken_at)
+    participant = segment.get("participant") or {}
+    speaker = participant.get("name") or "参加者"
+
+    def word_time(value):
+        if value.get("absolute"):
+            return timestamp(value["absolute"])
+        return transcript["started_at"] + timedelta(seconds=float(value["relative"]))
+
+    started = word_time(words[0].get("start_timestamp") or {})
+    end = words[-1].get("end_timestamp")
+    ended = max(started, word_time(end)) if end else None
+    source = "live" if final_index is None else "final"
+    # Final index preserves genuinely repeated identical captions; transaction
+    # rollback plus imported_at makes full-download replay idempotent.
+    key = ("live:" + caption_key(str(transcript["id"]), segment) if final_index is None
+           else f"final:{transcript['id']}:{final_index}")
+    insert_source(cur, run, key, speaker, "".join(w.get("text", "") for w in words), started,
+                  source=source, ended_at=ended, transcript_id=transcript["id"],
+                  participant_id=str(participant["id"]) if participant.get("id") is not None else None,
+                  raw=segment)
 
 
 def transcript_row(cur, run, transcript_id, recording_id, client):
@@ -108,6 +108,7 @@ def handle_event(cur, run, event, client):
         row = transcript_row(cur, run, tid, rid, client)
         if kind == "transcript.data":
             import_segment(cur, run, row, data)
+            reconcile_speech(cur, run)
         else:
             cur.execute("UPDATE recall_transcripts SET ready=%s,failed=%s WHERE id=%s",
                         (kind == "transcript.done", kind == "transcript.failed", tid))
@@ -217,8 +218,17 @@ def maintain(cur, run, client):
         failed = any(t["failed"] for t in transcripts)
         for transcript in transcripts:
             if transcript["ready"] and not transcript["imported_at"]:
-                for segment in client.transcript(str(transcript["id"])):
-                    import_segment(cur, run, transcript, segment)
+                segments = client.transcript(str(transcript["id"]))
+                if not isinstance(segments, list):
+                    raise ValueError("Invalid final transcript")
+                if not any(s.get("words") for s in segments):
+                    cur.execute("SELECT EXISTS(SELECT 1 FROM recall_captions WHERE transcript_id=%s AND source='live') AS present", (transcript["id"],))
+                    if cur.fetchone()["present"]:
+                        raise ValueError("Empty final transcript would erase live evidence")
+                replace_live(cur, transcript)
+                for index, segment in enumerate(segments):
+                    import_segment(cur, run, transcript, segment, final_index=index)
+                reconcile_speech(cur, run)
                 cur.execute("UPDATE recall_transcripts SET imported_at=now() WHERE id=%s", (transcript["id"],))
         cur.execute("SELECT count(*) AS n FROM recall_transcripts WHERE run_id=%s AND imported_at IS NULL", (run["id"],))
         pending = cur.fetchone()["n"]

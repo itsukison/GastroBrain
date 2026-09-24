@@ -9,7 +9,7 @@ import json
 import time
 import tempfile
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -45,7 +45,7 @@ def database(tmp_path_factory):
                   "CREATE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql AS $$SELECT NULL::uuid$$; "
                   "CREATE FUNCTION auth.jwt() RETURNS jsonb LANGUAGE sql AS $$SELECT '{}'::jsonb$$; "
                   "CREATE TABLE queries(id uuid PRIMARY KEY);")
-        for migration in ["002_web_chat.sql", "014_meetings.sql", "015_recall_runs.sql"]:
+        for migration in ["002_web_chat.sql", "014_meetings.sql", "015_recall_runs.sql", "20260924033828_recall_transcript_sources.sql"]:
             c.execute((ROOT / "migrations" / migration).read_text())
     yield uri
     server.cleanup()
@@ -307,3 +307,157 @@ def test_transport_create_is_not_retried_and_payload_is_scoped():
     assert payload["recording_config"]["transcript"]["provider"] == {"meeting_captions": {"language_code": "ja"}}
     assert payload["metadata"] == {"gastrobrain_run_id": "run"}
     assert "#launch=" in payload["output_media"]["camera"]["config"]["url"]
+
+
+def spoken_turn(env, auth, text="資料を確認しました。", start_at=10, end_at=15, item="answer", timed=True):
+    origin = datetime.fromisoformat(env.fake.started_at)
+    body = {"item_id": item, "text": text, "spoken_at": (origin + timedelta(seconds=start_at)).isoformat()}
+    if timed:
+        body["ended_at"] = (origin + timedelta(seconds=end_at)).isoformat()
+    return env.http.post("/v1/recall/bot/spoken", headers=auth, json=body)
+
+
+def unknown_segment(text="資料を確認しました。", start_at=11):
+    value = segment(text, start_at)
+    value["participant"] = {"id": 2147483647, "name": "Unknown"}
+    return value
+
+
+@pytest.mark.parametrize("spoken_first", [True, False])
+def test_unknown_ai_caption_reconciles_in_either_arrival_order(env, spoken_first):
+    _, auth = start(env)
+    if spoken_first:
+        assert spoken_turn(env, auth).status_code == 200
+    event(env, "transcript.data", unknown_segment())
+    worker.tick()
+    assert spoken_turn(env, auth).status_code == 200
+    assert spoken_turn(env, auth).status_code == 200  # retry
+    assert sql(env, "SELECT speaker,text FROM meeting_segments") == [{"speaker": "商談AI", "text": "資料を確認しました。"}]
+    evidence = sql(env, "SELECT raw,segment_id FROM recall_captions WHERE source='live'")[0]
+    assert evidence["raw"]["participant"]["name"] == "Unknown" and evidence["segment_id"] is None
+
+
+def test_unrelated_unknown_named_human_short_and_later_repetition_survive(env):
+    _, auth = start(env)
+    spoken_turn(env, auth)
+    for caption in [unknown_segment("別の質問があります。"), unknown_segment(start_at=30),
+                    segment("資料を確認しました。", 11), unknown_segment("はい。")]:
+        event(env, "transcript.data", caption)
+    worker.tick()
+    assert len(sql(env, "SELECT * FROM meeting_segments")) == 5
+
+
+def test_legacy_client_without_playback_interval_does_not_suppress(env):
+    _, auth = start(env)
+    assert spoken_turn(env, auth, timed=False).status_code == 200
+    event(env, "transcript.data", unknown_segment())
+    worker.tick()
+    assert len(sql(env, "SELECT * FROM meeting_segments")) == 2
+    assert spoken_turn(env, auth, start_at=15, end_at=10, item="invalid").status_code == 422
+
+
+def test_final_replaces_fragments_preserves_spoken_and_ignores_late_live(env):
+    _, auth = start(env)
+    spoken_turn(env, auth)
+    event(env, "transcript.data", segment("前半。", 1))
+    event(env, "transcript.data", segment("後半。", 3))
+    event(env, "transcript.data", unknown_segment())
+    worker.tick()
+    env.fake.segments = [segment("前半。後半。", 1), unknown_segment()]
+    env.fake.transcript_ready = True
+    event(env, "bot.done")
+    event(env, "transcript.done")
+    sql(env, "UPDATE recall_runs SET next_check_at=now()")
+    worker.tick()
+    expected = [{"text": "前半。後半。"}, {"text": "資料を確認しました。"}]
+    assert sql(env, "SELECT text FROM meeting_segments ORDER BY seq") == expected
+    assert env.summaries == [2]
+    assert all(row['superseded'] for row in sql(env, "SELECT superseded FROM recall_captions WHERE source='live'"))
+    event(env, "transcript.data", segment("前半。", 1))
+    event(env, "transcript.data", segment("遅れて届いた断片。", 2))
+    event(env, "transcript.done")
+    worker.tick()
+    assert sql(env, "SELECT text FROM meeting_segments ORDER BY seq") == expected
+    assert env.summaries == [2]
+
+
+def test_final_import_rollback_retains_live_and_retries_cleanly(env):
+    start(env)
+    event(env, "transcript.data", segment("元の字幕。", 1))
+    worker.tick()
+    env.fake.segments = [segment("途中まで。", 1), {"words": [{"text": "壊れた時刻"}]}]
+    env.fake.transcript_ready = True
+    event(env, "bot.done")
+    event(env, "transcript.done")
+    sql(env, "UPDATE recall_runs SET next_check_at=now()")
+    worker.tick()
+    assert sql(env, "SELECT text FROM meeting_segments") == [{"text": "元の字幕。"}]
+    assert sql(env, "SELECT imported_at FROM recall_transcripts")[0]['imported_at'] is None
+    assert sql(env, "SELECT source FROM recall_captions") == [{'source': 'live'}]
+    env.fake.segments = [segment("完成した字幕。", 1)]
+    sql(env, "UPDATE recall_runs SET next_check_at=now()")
+    worker.tick()
+    assert sql(env, "SELECT text FROM meeting_segments") == [{"text": "完成した字幕。"}]
+
+
+def test_final_representation_changes_and_genuine_repetitions(env):
+    start(env)
+    live = segment("確認。", 1.000000001)
+    event(env, "transcript.data", live)
+    worker.tick()
+    final = segment("確認。", 1)
+    final['words'] = [dict(final['words'][0], text="確"), dict(final['words'][0], text="認。")]
+    env.fake.segments = [final, final]  # Final position distinguishes real repetitions.
+    env.fake.transcript_ready = True
+    event(env, "bot.done")
+    event(env, "transcript.done")
+    sql(env, "UPDATE recall_runs SET next_check_at=now()")
+    worker.tick()
+    assert sql(env, "SELECT text FROM meeting_segments") == [{"text": "確認。"}, {"text": "確認。"}]
+
+
+def test_source_metadata_stays_private(env):
+    start(env)
+    for role in ("anon", "authenticated"):
+        with env.db() as c:
+            c.execute(f"SET LOCAL ROLE {role}")
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                c.execute("SELECT raw FROM recall_captions")
+
+
+def test_caption_match_is_conservative():
+    from gastrobrain.recall_transcript import matches_speech
+    assert matches_speech("資料を確認しました。", "はい、資料を確認しました。続けます。")
+    assert matches_speech("この商品については社内の資料を確認してからご案内いたします。", "この商品については社内の資料を確認してから御案内いたします。")
+    assert not matches_speech("はい", "はい")
+    assert not matches_speech("資料を確認しました。その説明は間違っています。", "資料を確認しました。")
+
+
+@pytest.mark.parametrize("spoken_first", [True, False])
+def test_short_caption_tail_joins_its_phrase_but_not_unrelated_speech(env, spoken_first):
+    _, auth = start(env)
+    text = "資料を確認しましたので、お待ちください。"
+    if spoken_first:
+        spoken_turn(env, auth, text)
+    event(env, "transcript.data", unknown_segment("資料を確認しましたので、お待ち", 11))
+    worker.tick()
+    event(env, "transcript.data", unknown_segment("ください。", 12))
+    event(env, "transcript.data", unknown_segment("質問です。", 14))
+    worker.tick()
+    if not spoken_first:
+        spoken_turn(env, auth, text)
+    rows = sql(env, "SELECT speaker,text FROM meeting_segments ORDER BY spoken_at")
+    assert rows == [{"speaker": "商談AI", "text": text}, {"speaker": "Unknown", "text": "質問です。"}]
+
+
+def test_empty_final_does_not_erase_live_evidence(env):
+    start(env)
+    event(env, "transcript.data", segment("保存済みの会話です。", 1))
+    worker.tick()
+    env.fake.transcript_ready = True
+    event(env, "bot.done")
+    event(env, "transcript.done")
+    sql(env, "UPDATE recall_runs SET next_check_at=now()")
+    worker.tick()
+    assert sql(env, "SELECT text FROM meeting_segments") == [{"text": "保存済みの会話です。"}]
+    assert env.summaries == []

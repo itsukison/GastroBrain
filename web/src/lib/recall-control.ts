@@ -1,6 +1,8 @@
 import type { AgentState, MeetingGate } from "./meeting-mode";
+import type { RecallAvailability } from "./recall-display";
 export type RecallControlOptions = { enabled: boolean; status: "idle" | "connecting" | "live" | "ended" | "error";
-  gate: { current: MeetingGate | null }; start: () => Promise<void>; stop: () => void };
+  gate: { current: MeetingGate | null }; start: () => Promise<void>; stop: () => void;
+  onAvailability?: (state: RecallAvailability) => void };
 
 /** One controller survives voice rotations and discards expired/revoked grants. */
 export function startRecallControl(current: () => RecallControlOptions, request = fetch, now = Date.now) {
@@ -12,6 +14,8 @@ export function startRecallControl(current: () => RecallControlOptions, request 
     let lastStart = 0;
     let starts: number[] = [];
     let ack: string[] = [];
+    let hasStarted = false;
+    const report = (state: RecallAvailability) => current().onAvailability?.(state);
     const controller = new AbortController();
     async function poll() {
       if (disposed || terminal) return;
@@ -27,6 +31,7 @@ export function startRecallControl(current: () => RecallControlOptions, request 
         if ([401, 403, 409].includes(response.status)) {
           terminal = true;
           o.stop();
+          report(response.status === 401 ? "ended" : "failed");
           return;
         }
         if (!response.ok) throw new Error("control unavailable");
@@ -35,16 +40,21 @@ export function startRecallControl(current: () => RecallControlOptions, request 
         ack = [];
         if (!data.active) {
           if (o.status === "live" || o.status === "connecting") o.stop();
+          report("connecting");
         } else if (["idle", "ended", "error"].includes(o.status) && now() - lastStart >= 15_000) {
           starts = starts.filter(t => now() - t < 180_000);
-          if (starts.length >= 3) { terminal = true; o.stop(); return; }
+          if (starts.length >= 3) { terminal = true; o.stop(); report("failed"); return; }
           starts.push(now());
           lastStart = now();
+          report(hasStarted ? "reconnecting" : "connecting");
+          hasStarted = true;
           await o.start();
           if (disposed) return;
           // Restore the authoritative gate state after each 55-minute rotation.
           current().gate.current?.set(data.agent_state, "recall-sync");
         }
+        if (data.active && current().status === "live") report("ready");
+        else if (data.active && hasStarted) report("reconnecting");
         if (data.agent_state !== observed) current().gate.current?.set(data.agent_state, "recall-sync");
         observed = data.agent_state;
         for (const command of data.commands) {
@@ -52,7 +62,10 @@ export function startRecallControl(current: () => RecallControlOptions, request 
           ack.push(command.id);
         }
       } catch {
-        if (!disposed && now() - lastSuccess > 15_000) current().stop();
+        if (!disposed && now() - lastSuccess > 15_000) {
+          current().stop();
+          report("reconnecting");
+        }
       } finally {
         if (!disposed && !terminal) timer = setTimeout(() => void poll(), 2_000);
       }

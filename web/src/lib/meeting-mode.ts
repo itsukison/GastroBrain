@@ -367,10 +367,12 @@ export function attachMeetingGate(
   options: {
     onState?: (state: AgentState) => void;
     onActivity?: (activity: GateState) => void;
+    /** A question was accepted, before requesting its response. */
+    onTurn?: () => void;
     idleMs?: number;
   } = {},
 ): MeetingGate {
-  const { onState, onActivity, idleMs = OPEN_IDLE_MS } = options;
+  const { onState, onActivity, onTurn, idleMs = OPEN_IDLE_MS } = options;
 
   let state: AgentState = "asleep";
   // Set optimistically when the request is sent rather than on `response.created`,
@@ -425,6 +427,7 @@ export function attachMeetingGate(
     }
     answering = true;
     clearIdle();
+    onTurn?.();
     onActivity?.("answering");
     session.transport.sendEvent({ type: "response.create" });
   };

@@ -14,15 +14,20 @@ The bot's RAG access is the initiating operator's current access scope.
 
 The bot loads `/voice/recall` in Recall Output Media. Its default microphone is
 the meeting audio; an audio element returns speech to the room. The camera shows
-only 商談AI and connection status. Wake words, typed commands, follow-ups and the
+商談AI, the awake/standby state, wake/quiet command hints, and search/response
+activity. The latest RAG answer appears with up to two reference document titles
+and a count of additional sources; source URLs, snippets, account UI, and raw
+errors are excluded. This is a read-only camera view. The normal website retains
+clickable sources. Wake words, typed commands, follow-ups and the
 90-second idle timeout use the existing meeting gate. Voice rotates at 55 minutes
 using the same run, meeting and conversation. Three failed starts within three
 minutes stop page recovery; a 180-second health watchdog asks the bot to leave.
 
-The pilot reserves the display name 商談AI for the bot. Its completed playback
-transcripts are stored once by item ID; Recall captions with that display name
-are excluded to avoid double recording. Validate the actual playback and echo
-behavior in the live pilot. A page crash during a spoken turn can lose that turn.
+The pilot reserves the display name 商談AI for the bot. Fully played responses
+are stored once by response ID with playback start/end times. Matching Recall
+captions are reconciled using text and timing while retaining source evidence.
+Interrupted playback relies on captions. Validate playback and echo behavior in
+a live call; a page crash can lose the browser copy of a spoken turn.
 
 Japanese meeting captions are ingested live, then reconciled against the final
 Recall transcript. A missing/failed transcript is surfaced on the run and does
@@ -52,6 +57,38 @@ original recording timestamps before the existing summary/Q&A code reads them.
   Recall's own recording limit defaults to two hours as a separate exit bound.
 
 ## Deployment
+
+### Transcript reconciliation rollout
+
+Production migration applied 2026-09-24 UTC: existing transcript rows preserved,
+RLS verified enabled, and browser-role SELECT privileges verified absent.
+
+For a new environment, apply `migrations/20260924033828_recall_transcript_sources.sql` after migration
+015 and **before deploying the updated backend**. The CLI-generated migration
+is stored in this repository's existing `migrations/` directory. It extends the
+private caption ledger with source/transcript/participant metadata, raw evidence,
+playback intervals and a link to the displayed transcript row. Existing RLS and
+the absence of browser-role grants remain unchanged.
+
+Roll out between calls: let existing runs finalize before deploying the backend,
+then deploy the frontend so it can submit `ended_at`. Older frontends remain
+accepted but their untimed speech cannot suppress unknown captions. New frontend
+payloads require the updated backend. Do not roll the backend back while new bot
+pages are running, since the old request schema rejects `ended_at`.
+
+The final Recall download replaces its live captions atomically; late events
+cannot re-add them. The browser saves one fully played response with its actual
+playback-event interval. Unknown captions are reconciled using timing and strong
+text evidence, including split phrases; named human speech and ambiguous short
+acknowledgements remain. Interrupted playback relies on Recall captions.
+Raw source evidence survives reconciliation and remains server-only.
+
+Historical rows are retained without guessing provenance. This migration does
+not repair existing duplicated meetings or regenerate their summaries.
+See `TRANSCRIPT_DUPLICATION_ANALYSIS.md` for evidence and limitations. Verify a
+new live call before relying on timing-based reconciliation in production.
+
+### Initial pilot setup
 
 1. Apply `migrations/015_recall_runs.sql`. These five private tables have RLS and
    no grants to anonymous/authenticated Data API roles. Use the backend DB role.
@@ -98,3 +135,30 @@ claims/expiry, state synchronization, manual stop and health shutdown. RAG calls
 are routed into the existing `voice_ask` under the verified run identity.
 
 Deployment and live-pilot evidence is recorded in `../../meetron/RECALL_PLAN.md`.
+
+## Camera display
+
+`web/src/components/recall-display.tsx` is shared by launch and live session
+screens. Unavailable sessions show preparation/reconnection/failure/end states
+instead of a stale awake indicator. Quiet changes future response eligibility;
+it does not cancel speech already playing, so standby and response activity can
+appear together. Playback events keep the response indicator visible after
+generation has finished.
+
+The answer card is scoped to an accepted question and lookup. Ordinary room
+speech does not dismiss it. A new accepted question, failed search, or session
+stop/restart clears it; late results from an older question/session cannot replace
+the current card. Direct answers from the live conversation currently have no
+answer card. Reference titles represent the documents supplied to RAG, not a
+claim-by-claim citation mapping, and are labeled 参照資料.
+
+For offline visual review, run `node scripts/preview-recall-display.mjs` from
+`web/`. It renders the actual component with twelve synthetic scenarios into
+`/tmp/recall-display-preview`, without credentials, microphone use, or a bot.
+Review at 1280×720, 640×360 and 320×180. Long answers/titles are clamped; pin the
+tile to read source details. Frontend tests cover card lifetime, stale results,
+accepted-turn notifications, and controller availability transitions.
+
+The display and transcript fixes ship together. A live camera/audio and caption
+reconciliation check remains required after rollout. Automated verification:
+70 backend tests, 68 frontend tests, typecheck and production build passed.

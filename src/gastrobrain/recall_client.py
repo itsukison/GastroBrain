@@ -162,7 +162,8 @@ def digest(value: str) -> str:
 
 
 def caption_key(transcript_id: str, segment: dict) -> str:
-    # Same key for live and final download forms; no webhook arrival timestamp.
+    # Exact live-event replay key. Final downloads can regroup/retokenize speech
+    # and must replace live rows rather than trying to reuse this hash.
     words = segment.get("words") or []
     normalized = [(w.get("text", ""), (w.get("start_timestamp") or {}).get("relative"))
                   for w in words]

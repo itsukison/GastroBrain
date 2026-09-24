@@ -1,0 +1,47 @@
+.display {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100dvh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding: 5.3vh 4.5vw 6.5vh;
+  color: #eef4f3;
+  background: radial-gradient(ellipse at 85% 0%, #17302e 0%, transparent 55%), #101a1d;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Hiragino Sans", "Yu Gothic", sans-serif;
+  --state: #b7c7cf;
+}
+.display[data-tone="active"] { --state: #8ee9bd; }
+.display[data-tone="standby"] { --state: #b5c8e5; }
+.display[data-tone="error"] { --state: #ffb4a7; }
+.header, .brand, .statusLine, .activity, .command, .cardLabel, .footer { display: flex; align-items: center; }
+.header { justify-content: space-between; flex-shrink: 0; }
+.brand { gap: 1vw; font-size: 2.35vw; font-weight: 650; letter-spacing: .04em; }
+.brandMark { display: grid; place-items: center; width: 3.3vw; height: 3.3vw; border-radius: 1vw; background: #213b37; color: #8ee9bd; }
+.brandMark svg { width: 2vw; height: 2vw; }
+.eyebrow { font-size: 1.15vw; letter-spacing: .22em; color: #92aaa8; }
+.status { margin-top: 4.5vh; flex-shrink: 0; }
+.statusLine { gap: 1.3vw; color: var(--state); }
+.statusLine h1 { font-size: 5.4vw; line-height: 1.2; font-weight: 650; letter-spacing: .015em; margin: 0; }
+.stateIcon { width: 4.1vw; height: 4.1vw; stroke-width: 1.6; flex-shrink: 0; }
+.activity { margin-left: auto; gap: .6vw; padding: .75vw 1.2vw; border: 1px solid #45605c; border-radius: 99px; color: #d8e7e4; font-size: 1.55vw; white-space: nowrap; }
+.activity svg { width: 1.5vw; height: 1.5vw; }
+.detail { margin: 1.4vh 0 0; font-size: 1.85vw; color: #bacbc9; }
+.command { margin-top: 2.8vh; gap: 1.7vw; flex-shrink: 0; }
+.commandLabel { color: #9bb4af; font-size: 1.55vw; }
+.command strong { font-size: 3.25vw; line-height: 1.35; font-weight: 550; letter-spacing: .02em; }
+.answerCard { display: flex; flex: 1; min-height: 0; margin-top: 3.5vh; border: 1px solid #36504b; border-radius: 1.5vw; background: #192a2a; overflow: hidden; }
+.answerBody { flex: 1; min-width: 0; padding: 2vw; overflow: hidden; }
+.cardLabel { gap: .65vw; font-size: 1.25vw; letter-spacing: .04em; color: #a5c1b9; }
+.cardLabel svg { width: 1.4vw; height: 1.4vw; }
+.answerText { font-size: 2.15vw; line-height: 1.65; margin: 1.1vh 0 0; overflow-wrap: anywhere; white-space: pre-wrap; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden; }
+.sources { box-sizing: border-box; width: 34%; flex-shrink: 0; padding: 2vw; border-left: 1px solid #36504b; background: #142323; overflow: hidden; }
+.sources ol { list-style: none; padding: 0; margin: 1.8vh 0 0; display: flex; flex-direction: column; gap: 1.4vh; }
+.sources li { display: flex; align-items: baseline; gap: .75vw; color: #d2dfdc; font-size: 1.5vw; line-height: 1.5; }
+.sources li > span:last-child { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
+.sourceNumber { color: #87b7a2; font-size: 1.15vw; font-variant-numeric: tabular-nums; flex-shrink: 0; }
+.more { margin: 1vh 0 0; font-size: 1.15vw; color: #9bb4af; }
+.empty { flex: 1; min-height: 0; display: flex; align-items: center; gap: 1.5vw; color: #799b93; }
+.empty p { font-size: 1.8vw; }
+.emptyRule { width: 4vw; height: 1px; background: #547b6f; }
+.footer { justify-content: space-between; margin-top: 2.5vh; min-height: 2vh; color: #9bb4af; font-size: 1.3vw; flex-shrink: 0; }

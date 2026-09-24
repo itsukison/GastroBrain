@@ -12,7 +12,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request
 from psycopg.rows import dict_row
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from gastrobrain.auth import AuthUser, require_user
 from gastrobrain.config import get_settings
@@ -277,17 +277,28 @@ class SpokenBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     item_id: str = Field(min_length=1, max_length=200)
     text: str = Field(min_length=1, max_length=10000)
-    spoken_at: datetime
+    spoken_at: AwareDatetime
+    ended_at: AwareDatetime | None = None
+
+    @model_validator(mode="after")
+    def valid_interval(self):
+        if self.ended_at is not None and not (timedelta(0) <= self.ended_at - self.spoken_at <= timedelta(minutes=10)):
+            raise ValueError("Invalid playback interval")
+        return self
 
 
 @router.post("/bot/spoken")
 async def spoken(body: SpokenBody, run=Depends(bot_session)):
-    from gastrobrain.recall_worker import insert_caption
+    from gastrobrain.recall_transcript import insert_source, reconcile_speech
     def insert():
         with conn() as c, c.cursor(row_factory=dict_row) as cur:
             cur.execute("SELECT * FROM recall_runs WHERE id=%s FOR UPDATE", (run["id"],))
             locked = cur.fetchone()
-            insert_caption(cur, locked, "spoken:" + body.item_id, "商談AI", body.text, body.spoken_at)
+            if not locked or locked["state"] not in {"creating", "uncertain", "joining", "live"} or locked["session_hash"] is None:
+                raise HTTPException(401, "Bot session ended")
+            insert_source(cur, locked, "spoken:" + body.item_id, "商談AI", body.text, body.spoken_at,
+                          source="spoken", ended_at=body.ended_at, raw=body.model_dump(mode="json"))
+            reconcile_speech(cur, locked)
             c.commit()
     await asyncio.to_thread(insert)
     return {"ok": True}
